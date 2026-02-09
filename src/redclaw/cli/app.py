@@ -1,6 +1,6 @@
 """
 RedClaw CLI - Claude Code-like TUI Application
-Professional terminal UI with Rich library
+Professional terminal UI with Rich library and Tab completion
 """
 
 import asyncio
@@ -20,8 +20,22 @@ from rich.syntax import Syntax
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.text import Text
 from rich.style import Style
-from rich.prompt import Prompt, Confirm
 from rich import box
+
+# Prompt toolkit for Claude Code-like experience
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import (
+        Completer, Completion, WordCompleter, 
+        merge_completers, FuzzyCompleter
+    )
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.styles import Style as PTStyle
+    from prompt_toolkit.formatted_text import HTML
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
 
 from ..core import (
     RedClawLLM, get_llm_client, Message, StreamChunk,
@@ -67,36 +81,207 @@ BANNER = """
 [bright_cyan]v2.0[/bright_cyan] | [bright_yellow]Autonomous Red Team AI Agent[/bright_yellow]
 """
 
-HELP_TEXT = """
-[bold cyan]Commands:[/bold cyan]
-  [green]target[/green] <host>    - Set target for testing
-  [green]scan[/green]             - Start reconnaissance & scanning
-  [green]exploit[/green]          - Attempt exploitation (requires confirmation)
-  [green]report[/green]           - Generate findings report
-  
-  [green]status[/green]           - Show current session status
-  [green]findings[/green]         - List discovered findings
-  [green]history[/green]          - Show command history
-  
-  [green]session save[/green]     - Save current session
-  [green]session load[/green] <id>- Load previous session
-  [green]session list[/green]     - List saved sessions
-  
-  [green]config[/green]           - Show configuration
-  [green]help[/green]             - Show this help
-  [green]exit[/green]             - Exit RedClaw
 
-[bold cyan]Interactive Mode:[/bold cyan]
-  Just type your request in natural language!
-  Example: "Find all open ports on the target"
-"""
+# ==================== Commands & Placeholders ====================
 
+# Claude Code-like command definitions with descriptions
+COMMANDS = {
+    # Targeting
+    "target": {
+        "description": "Set target host for testing",
+        "usage": "target <hostname or IP>",
+        "examples": ["target example.com", "target 192.168.1.1"],
+    },
+    
+    # Scanning
+    "scan": {
+        "description": "Start reconnaissance & scanning on target",  
+        "usage": "scan [options]",
+        "examples": ["scan", "scan --deep", "scan --passive"],
+    },
+    "recon": {
+        "description": "Passive reconnaissance only",
+        "usage": "recon <target>",
+        "examples": ["recon example.com"],
+    },
+    
+    # Exploitation
+    "exploit": {
+        "description": "Attempt exploitation (requires confirmation)",
+        "usage": "exploit [vulnerability]",
+        "examples": ["exploit", "exploit CVE-2021-44228"],
+    },
+    "payload": {
+        "description": "Generate payload for target",
+        "usage": "payload <type>",
+        "examples": ["payload reverse_shell", "payload meterpreter"],
+    },
+    
+    # Post-Exploitation
+    "privesc": {
+        "description": "Find privilege escalation vectors",
+        "usage": "privesc",
+        "examples": ["privesc"],
+    },
+    "persist": {
+        "description": "Establish persistence",
+        "usage": "persist <method>",
+        "examples": ["persist cron", "persist service"],
+    },
+    "exfil": {
+        "description": "Exfiltrate data",
+        "usage": "exfil <file>",
+        "examples": ["exfil /etc/passwd"],
+    },
+    
+    # Reporting
+    "report": {
+        "description": "Generate findings report",
+        "usage": "report [format]",
+        "examples": ["report", "report --format pdf"],
+    },
+    "findings": {
+        "description": "List discovered findings",
+        "usage": "findings",
+        "examples": ["findings"],
+    },
+    
+    # Session
+    "session": {
+        "description": "Manage sessions",
+        "usage": "session <save|load|list>",
+        "examples": ["session save", "session load abc123", "session list"],
+    },
+    "status": {
+        "description": "Show current session status",
+        "usage": "status",
+        "examples": ["status"],
+    },
+    "history": {
+        "description": "Show command history",
+        "usage": "history",
+        "examples": ["history"],
+    },
+    
+    # AI Red Team
+    "ai-attack": {
+        "description": "Launch AI red team attack on LLM",
+        "usage": "ai-attack <target_api>",
+        "examples": ["ai-attack chatgpt", "ai-attack claude"],
+    },
+    "jailbreak": {
+        "description": "Attempt LLM jailbreak",
+        "usage": "jailbreak <method>",
+        "examples": ["jailbreak roleplay", "jailbreak encoding"],
+    },
+    
+    # Tools
+    "nmap": {
+        "description": "Run nmap scan",
+        "usage": "nmap <target> [options]",
+        "examples": ["nmap -sV target", "nmap -A -p- target"],
+    },
+    "nikto": {
+        "description": "Run nikto web scanner",
+        "usage": "nikto <target>",
+        "examples": ["nikto -h target"],
+    },
+    "gobuster": {
+        "description": "Directory bruteforce",
+        "usage": "gobuster <target>",
+        "examples": ["gobuster dir -u target -w wordlist"],
+    },
+    
+    # System
+    "config": {
+        "description": "Show configuration",
+        "usage": "config",
+        "examples": ["config"],
+    },
+    "help": {
+        "description": "Show help",
+        "usage": "help [command]",
+        "examples": ["help", "help scan"],
+    },
+    "clear": {
+        "description": "Clear screen",
+        "usage": "clear",
+        "examples": ["clear"],
+    },
+    "exit": {
+        "description": "Exit RedClaw",
+        "usage": "exit",
+        "examples": ["exit"],
+    },
+}
+
+# Placeholder suggestions shown when empty (like Claude Code)
+PLACEHOLDER_SUGGESTIONS = [
+    "target example.com     Set a target to begin",
+    "scan                   Start reconnaissance scan", 
+    "exploit                Attempt exploitation",
+    "report                 Generate findings report",
+    "help                   Show all commands",
+]
+
+
+# ==================== Custom Completer ====================
+
+class RedClawCompleter(Completer):
+    """Claude Code-like command completer with descriptions"""
+    
+    def __init__(self, commands: Dict):
+        self.commands = commands
+    
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.lstrip()
+        words = text.split()
+        
+        if len(words) == 0:
+            # Empty input - show all commands with descriptions
+            for cmd, info in sorted(self.commands.items()):
+                yield Completion(
+                    cmd,
+                    start_position=0,
+                    display=cmd,
+                    display_meta=info["description"]
+                )
+        
+        elif len(words) == 1:
+            # Partial command - complete command names
+            partial = words[0].lower()
+            for cmd, info in sorted(self.commands.items()):
+                if cmd.startswith(partial):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(partial),
+                        display=cmd,
+                        display_meta=info["description"]
+                    )
+        
+        else:
+            # After command - show examples
+            cmd = words[0].lower()
+            if cmd in self.commands:
+                info = self.commands[cmd]
+                # Show usage
+                yield Completion(
+                    "",
+                    start_position=0,
+                    display=f"Usage: {info['usage']}",
+                    display_meta=""
+                )
+
+
+# ==================== Main App ====================
 
 class RedClawApp:
     """
     RedClaw CLI Application
     
     Claude Code-inspired interface with:
+    - Tab completion with command descriptions
+    - Placeholder suggestions
     - Streaming LLM responses
     - Rich panels and tables
     - Progress indicators
@@ -128,6 +313,9 @@ class RedClawApp:
         self.auto_exploit = False
         self.verbose = False
         self.llm_url = llm_url
+        
+        # Prompt session with completion
+        self.prompt_session = None
     
     async def initialize(self) -> bool:
         """Initialize all components"""
@@ -166,6 +354,17 @@ class RedClawApp:
                     auto_exploit=self.auto_exploit
                 )
                 
+                # Initialize prompt session with Tab completion
+                if PROMPT_TOOLKIT_AVAILABLE:
+                    history_file = data_dir / "command_history"
+                    self.prompt_session = PromptSession(
+                        completer=FuzzyCompleter(RedClawCompleter(COMMANDS)),
+                        history=FileHistory(str(history_file)),
+                        auto_suggest=AutoSuggestFromHistory(),
+                        complete_while_typing=True,
+                        enable_history_search=True,
+                    )
+                
                 return True
                 
             except Exception as e:
@@ -175,6 +374,14 @@ class RedClawApp:
     def show_banner(self):
         """Display banner"""
         self.console.print(BANNER)
+        self.console.print()
+    
+    def show_placeholder(self):
+        """Show placeholder suggestions like Claude Code"""
+        self.console.print()
+        self.console.print("[dim]Try these commands (or press Tab for more):[/dim]")
+        for suggestion in PLACEHOLDER_SUGGESTIONS:
+            self.console.print(f"  [cyan]›[/cyan] [dim]{suggestion}[/dim]")
         self.console.print()
     
     def show_status(self):
@@ -212,6 +419,43 @@ class RedClawApp:
             title="[bold cyan]Status[/bold cyan]",
             border_style="cyan"
         ))
+    
+    def show_help(self, command: str = None):
+        """Show help - command list or specific command help"""
+        
+        if command and command in COMMANDS:
+            # Specific command help
+            info = COMMANDS[command]
+            self.console.print(f"\n[bold cyan]{command}[/bold cyan]")
+            self.console.print(f"  {info['description']}")
+            self.console.print(f"  [dim]Usage:[/dim] {info['usage']}")
+            self.console.print(f"  [dim]Examples:[/dim]")
+            for ex in info['examples']:
+                self.console.print(f"    [green]› {ex}[/green]")
+            self.console.print()
+        else:
+            # All commands grouped
+            categories = {
+                "Targeting": ["target", "recon"],
+                "Scanning": ["scan", "nmap", "nikto", "gobuster"],
+                "Exploitation": ["exploit", "payload"],
+                "Post-Exploitation": ["privesc", "persist", "exfil"],
+                "AI Red Team": ["ai-attack", "jailbreak"],
+                "Reporting": ["report", "findings", "status"],
+                "Session": ["session", "history"],
+                "System": ["config", "help", "clear", "exit"],
+            }
+            
+            self.console.print("\n[bold cyan]RedClaw Commands[/bold cyan]")
+            self.console.print("[dim]Press Tab for autocomplete with descriptions[/dim]\n")
+            
+            for category, cmds in categories.items():
+                self.console.print(f"[bold]{category}[/bold]")
+                for cmd in cmds:
+                    if cmd in COMMANDS:
+                        desc = COMMANDS[cmd]['description']
+                        self.console.print(f"  [green]{cmd:15}[/green] {desc}")
+                self.console.print()
     
     def show_findings(self):
         """Display findings table"""
@@ -318,7 +562,7 @@ class RedClawApp:
             return False
         
         elif cmd == "help":
-            self.console.print(Markdown(HELP_TEXT))
+            self.show_help(args if args else None)
         
         elif cmd == "status":
             self.show_status()
@@ -338,7 +582,7 @@ class RedClawApp:
             else:
                 self.console.print("[yellow]Usage: target <hostname or IP>[/yellow]")
         
-        elif cmd == "scan":
+        elif cmd in ("scan", "recon"):
             if not self.target:
                 self.console.print("[yellow]No target set. Use 'target <host>' first.[/yellow]")
             else:
@@ -350,8 +594,7 @@ class RedClawApp:
             elif not self.findings:
                 self.console.print("[yellow]No findings to exploit. Run 'scan' first.[/yellow]")
             else:
-                if Confirm.ask("[yellow]⚠ Attempt exploitation?[/yellow]"):
-                    await self._run_exploit()
+                await self._run_exploit()
         
         elif cmd == "report":
             await self._generate_report()
@@ -365,6 +608,28 @@ class RedClawApp:
         elif cmd == "clear":
             self.console.clear()
             self.show_banner()
+        
+        elif cmd in ("ai-attack", "jailbreak"):
+            await self.stream_response(
+                f"I want to perform an {cmd} attack. "
+                f"Target: {args if args else 'general LLM'}. "
+                "Explain the methodology and provide example prompts."
+            )
+        
+        elif cmd in ("nmap", "nikto", "gobuster"):
+            # Tool commands - give guidance
+            target = args if args else self.target
+            await self.stream_response(
+                f"Give me the exact {cmd} command to scan {target or 'a typical web server'}. "
+                "Explain what each flag does."
+            )
+        
+        elif cmd in ("privesc", "persist", "exfil", "payload"):
+            await self.stream_response(
+                f"Explain how to perform {cmd} "
+                f"{'on ' + self.target if self.target else 'on a Linux system'}. "
+                "Provide specific commands and techniques."
+            )
         
         else:
             # Natural language query
@@ -390,7 +655,7 @@ class RedClawApp:
             # Phase 1: Recon
             progress.update(task, description="Reconnaissance...")
             await asyncio.sleep(0.5)
-            recon_result = await self.stream_response(
+            await self.stream_response(
                 f"Perform passive reconnaissance on {self.target}. "
                 "What DNS records, WHOIS info, and technology stack can you identify?"
             )
@@ -399,7 +664,7 @@ class RedClawApp:
             # Phase 2: Port scan
             progress.update(task, description="Port scanning...")
             await asyncio.sleep(0.3)
-            scan_result = await self.stream_response(
+            await self.stream_response(
                 f"What nmap command would you recommend for {self.target}? "
                 "Provide the exact command and explain what it does."
             )
@@ -407,7 +672,7 @@ class RedClawApp:
             
             # Phase 3: Vulnerability assessment
             progress.update(task, description="Vulnerability assessment...")
-            vuln_result = await self.stream_response(
+            await self.stream_response(
                 f"Based on typical services, what vulnerabilities should we check for on {self.target}? "
                 "List specific CVEs or vulnerability classes."
             )
@@ -495,6 +760,7 @@ See individual findings for specific remediation steps.
         table.add_row("Workspace", str(self.workspace))
         table.add_row("Auto-Exploit", "Enabled" if self.auto_exploit else "Disabled")
         table.add_row("Verbose", "Yes" if self.verbose else "No")
+        table.add_row("Tab Completion", "Enabled" if PROMPT_TOOLKIT_AVAILABLE else "Disabled")
         
         self.console.print(table)
     
@@ -546,6 +812,16 @@ See individual findings for specific remediation steps.
                 else:
                     self.console.print("[dim]No saved sessions.[/dim]")
     
+    def _get_prompt(self) -> str:
+        """Get formatted prompt string"""
+        phase_indicator = "●" if self.target else "○"
+        target_str = f" @ {self.target}" if self.target else ""
+        
+        if PROMPT_TOOLKIT_AVAILABLE:
+            return f"RedClaw{target_str} > "
+        else:
+            return f"[bold red]RedClaw[/bold red][cyan]{target_str}[/cyan] > "
+    
     async def run(self):
         """Main application loop"""
         
@@ -556,18 +832,27 @@ See individual findings for specific remediation steps.
             return
         
         self.console.print(f"[green]✓[/green] Ready | Session: [cyan]{self.session_id}[/cyan]")
-        self.console.print("[dim]Type 'help' for commands or ask anything![/dim]\n")
+        
+        # Show placeholder suggestions
+        self.show_placeholder()
         
         running = True
         while running:
             try:
-                # Prompt with status indicator
-                phase_color = "green" if self.phase == Phase.COMPLETED else "cyan"
-                target_str = f" @ {self.target}" if self.target else ""
+                if PROMPT_TOOLKIT_AVAILABLE and self.prompt_session:
+                    # Use prompt_toolkit with Tab completion
+                    user_input = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.prompt_session.prompt(
+                            HTML(f'<ansibrightred>RedClaw</ansibrightred>'
+                                 f'<ansicyan>{" @ " + self.target if self.target else ""}</ansicyan> › ')
+                        )
+                    )
+                else:
+                    # Fallback to rich prompt
+                    from rich.prompt import Prompt
+                    user_input = Prompt.ask(self._get_prompt())
                 
-                prompt = f"[bold red]RedClaw[/bold red][{phase_color}]{target_str}[/{phase_color}] > "
-                
-                user_input = Prompt.ask(prompt)
                 running = await self.handle_command(user_input)
                 
             except KeyboardInterrupt:
