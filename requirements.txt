@@ -1,0 +1,43 @@
+# RedClaw - Autonomous Penetration Testing System
+# Requirements File
+
+# Core Dependencies
+httpx>=0.25.0
+python-dotenv>=1.0.0
+rich>=13.0.0
+asyncio-compat>=0.1.0
+typing-extensions>=4.0.0
+
+# CLI
+click>=8.0.0
+prompt-toolkit>=3.0.0
+
+# Memory & RAG
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# Database
+asyncpg>=0.28.0
+redis>=5.0.0
+neo4j>=5.0.0
+
+# Optional: Vector similarity
+faiss-cpu>=1.7.0
+numpy>=1.24.0
+
+# Report Generation
+markdown>=3.4.0
+jinja2>=3.1.0
+
+# Security & Validation
+pydantic>=2.0.0
+
+# Web/API
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# Development
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+ruff>=0.0.280
