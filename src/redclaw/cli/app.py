@@ -948,6 +948,26 @@ See individual findings for specific remediation steps.
                 else:
                     self.console.print("[dim]No saved sessions.[/dim]")
     
+    async def _export_session(self, filename: str):
+        """Export session data to JSON file"""
+        import json
+        
+        export_data = {
+            "session_id": self.session_id,
+            "target": self.target,
+            "phase": self.phase.value,
+            "findings": self.findings,
+            "command_history": self.command_history,
+            "exported_at": datetime.now().isoformat()
+        }
+        
+        export_path = self.workspace / filename
+        with open(export_path, 'w') as f:
+            json.dump(export_data, f, indent=2)
+        
+        self.console.print(f"[green]✓[/green] Session exported: [cyan]{export_path}[/cyan]")
+
+    
     def _get_prompt(self) -> str:
         """Get formatted prompt string"""
         phase_indicator = "●" if self.target else "○"
