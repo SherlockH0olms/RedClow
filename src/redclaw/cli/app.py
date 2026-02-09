@@ -43,6 +43,15 @@ from ..core import (
     MemoryManager, RAGSystem
 )
 
+# Import autonomous agent (with fallback)
+try:
+    from ..agents.autonomous_agent import AutonomousAgent, auto_pwn
+    AUTONOMOUS_AGENT_AVAILABLE = True
+except ImportError:
+    AUTONOMOUS_AGENT_AVAILABLE = False
+    AutonomousAgent = None
+    auto_pwn = None
+
 
 # ==================== Styles ====================
 
@@ -192,6 +201,13 @@ COMMANDS = {
         "examples": ["gobuster dir -u target -w wordlist"],
     },
     
+    # Autonomous Mode
+    "auto-pwn": {
+        "description": "Launch autonomous AI agent to fully pentest a target",
+        "usage": "auto-pwn <target> [objective]",
+        "examples": ["auto-pwn 10.10.10.1", "auto-pwn victim.htb find flags", "auto-pwn 192.168.1.100 gain root access"],
+    },
+    
     # System
     "config": {
         "description": "Show configuration",
@@ -268,55 +284,60 @@ SLASH_COMMANDS = {
         "description": "Quick scan current target",
         "shortcut": None,
     },
+    "/auto-pwn": {
+        "description": "Launch autonomous AI pentesting agent",
+        "shortcut": "Ctrl+P",
+    },
 }
 
 
 # ==================== Custom Completer ====================
 
-class RedClawCompleter(Completer):
-    """Claude Code-like command completer with descriptions"""
-    
-    def __init__(self, commands: Dict):
-        self.commands = commands
-    
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor.lstrip()
-        words = text.split()
+if PROMPT_TOOLKIT_AVAILABLE:
+    class RedClawCompleter(Completer):
+        """Claude Code-like command completer with descriptions"""
         
-        if len(words) == 0:
-            # Empty input - show all commands with descriptions
-            for cmd, info in sorted(self.commands.items()):
-                yield Completion(
-                    cmd,
-                    start_position=0,
-                    display=cmd,
-                    display_meta=info["description"]
-                )
+        def __init__(self, commands: Dict):
+            self.commands = commands
         
-        elif len(words) == 1:
-            # Partial command - complete command names
-            partial = words[0].lower()
-            for cmd, info in sorted(self.commands.items()):
-                if cmd.startswith(partial):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor.lstrip()
+            words = text.split()
+            
+            if len(words) == 0:
+                # Empty input - show all commands with descriptions
+                for cmd, info in sorted(self.commands.items()):
                     yield Completion(
                         cmd,
-                        start_position=-len(partial),
+                        start_position=0,
                         display=cmd,
                         display_meta=info["description"]
                     )
-        
-        else:
-            # After command - show examples
-            cmd = words[0].lower()
-            if cmd in self.commands:
-                info = self.commands[cmd]
-                # Show usage
-                yield Completion(
-                    "",
-                    start_position=0,
-                    display=f"Usage: {info['usage']}",
-                    display_meta=""
-                )
+            
+            elif len(words) == 1:
+                # Partial command - complete command names
+                partial = words[0].lower()
+                for cmd, info in sorted(self.commands.items()):
+                    if cmd.startswith(partial):
+                        yield Completion(
+                            cmd,
+                            start_position=-len(partial),
+                            display=cmd,
+                            display_meta=info["description"]
+                        )
+            
+            else:
+                # After command - show examples
+                cmd = words[0].lower()
+                if cmd in self.commands:
+                    info = self.commands[cmd]
+                    # Show usage
+                    yield Completion(
+                        "",
+                        start_position=0,
+                        display=f"Usage: {info['usage']}",
+                        display_meta=""
+                    )
 
 
 # ==================== Main App ====================
@@ -665,6 +686,14 @@ class RedClawApp:
                     self.console.print("[yellow]No target. Use /target <host> first.[/yellow]")
                 return True
             
+            elif slash_cmd == "/auto-pwn":
+                target = slash_args if slash_args else self.target
+                if target:
+                    await self._run_auto_pwn(target)
+                else:
+                    self.console.print("[yellow]No target. Use /auto-pwn <target> or set target first.[/yellow]")
+                return True
+            
             else:
                 self.console.print(f"[yellow]Unknown slash command: {slash_cmd}. Type /help for list.[/yellow]")
                 return True
@@ -767,6 +796,9 @@ class RedClawApp:
                 "Provide specific commands and techniques."
             )
         
+        elif cmd == "auto-pwn":
+            await self._run_auto_pwn(args)
+        
         else:
             # Natural language query
             await self.stream_response(command)
@@ -839,6 +871,128 @@ class RedClawApp:
         )
         
         self.phase = Phase.POST_EXPLOITATION
+    
+    async def _run_auto_pwn(self, args: str = ""):
+        """
+        Launch autonomous AI pentesting agent
+        Usage: auto-pwn <target> [objective]
+        """
+        
+        if not AUTONOMOUS_AGENT_AVAILABLE:
+            self.console.print("[red]Autonomous agent not available.[/red]")
+            self.console.print("[dim]Install langgraph: pip install langgraph[/dim]")
+            return
+        
+        # Parse args: target [objective]
+        parts = args.split(maxsplit=1) if args else []
+        target = parts[0] if parts else self.target
+        objective = parts[1] if len(parts) > 1 else "Find all flags and report vulnerabilities"
+        
+        if not target:
+            self.console.print("[yellow]Usage: auto-pwn <target> [objective][/yellow]")
+            self.console.print("[dim]Example: auto-pwn 10.10.10.1 find all flags[/dim]")
+            return
+        
+        # Update current target
+        self.target = target
+        
+        # Display launch banner
+        self.console.print(Panel(
+            f"[bold bright_yellow]🎯 TARGET:[/bold bright_yellow] {target}\n"
+            f"[bold cyan]📋 OBJECTIVE:[/bold cyan] {objective}\n\n"
+            "[dim]The agent will autonomously:[/dim]\n"
+            "  • Scan for open ports and services\n"
+            "  • Enumerate discovered services\n"
+            "  • Attempt exploitation\n"
+            "  • Find and report flags\n\n"
+            "[yellow]Press Ctrl+C to abort at any time[/yellow]",
+            title="[bold red]⚡ AUTONOMOUS AGENT LAUNCHING ⚡[/bold red]",
+            border_style="red"
+        ))
+        
+        try:
+            # Create and run autonomous agent
+            agent = AutonomousAgent(
+                llm=self.llm,
+                workspace=str(self.workspace)
+            )
+            
+            # Set up event handlers for live updates
+            def on_phase_change(phase):
+                self.console.print(f"\n[cyan]>>> Phase:[/cyan] [bold]{phase}[/bold]")
+            
+            def on_tool_start(data):
+                tool = data.get('tool', 'unknown')
+                args = data.get('args', {})
+                self.console.print(f"  [dim]🔧 Running:[/dim] [green]{tool}[/green]")
+            
+            def on_tool_complete(data):
+                result = data.get('result', '')
+                if len(result) > 200:
+                    result = result[:200] + '...'
+                self.console.print(f"  [dim]✓ Result:[/dim] {result[:100]}")
+            
+            def on_flag_found(flag):
+                self.console.print(f"\n[bold green]🚩 FLAG FOUND:[/bold green] [bright_yellow]{flag}[/bright_yellow]\n")
+            
+            # Register handlers
+            agent.on('phase_change', on_phase_change)
+            agent.on('tool_start', on_tool_start)
+            agent.on('tool_complete', on_tool_complete)
+            agent.on('flag_found', on_flag_found)
+            
+            # Run the agent
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=self.console
+            ) as progress:
+                task = progress.add_task("Agent running...", total=None)
+                
+                result = await agent.run(
+                    target=target,
+                    objective=objective,
+                    max_iterations=50
+                )
+            
+            # Display results
+            flags = result.get('flags', [])
+            vulns = result.get('vulnerabilities', [])
+            
+            self.console.print("\n")
+            self.console.print(Panel(
+                f"[bold green]✓ AUTONOMOUS AGENT COMPLETE[/bold green]\n\n"
+                f"[cyan]Iterations:[/cyan] {result.get('iterations', 0)}\n"
+                f"[cyan]Flags Found:[/cyan] {len(flags)}\n"
+                f"[cyan]Vulnerabilities:[/cyan] {len(vulns)}\n\n"
+                + ("\n".join([f"  🚩 {f}" for f in flags]) if flags else "[dim]No flags found[/dim]"),
+                title="[bold cyan]🎯 RESULTS[/bold cyan]",
+                border_style="green"
+            ))
+            
+            # Add flags to findings
+            for flag in flags:
+                if isinstance(flag, dict):
+                    self.findings.append({
+                        'type': 'flag',
+                        'title': f"Flag: {flag.get('flag', 'unknown')}",
+                        'severity': 'info',
+                        'description': f"Found at {flag.get('location', 'unknown')} via {flag.get('method', 'unknown')}"
+                    })
+                else:
+                    self.findings.append({
+                        'type': 'flag',
+                        'title': f"Flag: {flag}",
+                        'severity': 'info',
+                        'description': 'Found by autonomous agent'
+                    })
+            
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]⚠ Agent aborted by user[/yellow]")
+        except Exception as e:
+            self.console.print(f"\n[red]Agent error: {e}[/red]")
+            import traceback
+            self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
     
     async def _generate_report(self):
         """Generate findings report"""

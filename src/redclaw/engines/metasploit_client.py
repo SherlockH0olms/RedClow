@@ -4,11 +4,18 @@ Metasploit Framework Integration via MSFRPC
 """
 
 import asyncio
-import msgpack
 import httpx
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+
+# Optional msgpack dependency
+try:
+    import msgpack
+    MSGPACK_AVAILABLE = True
+except ImportError:
+    MSGPACK_AVAILABLE = False
+    msgpack = None
 
 
 @dataclass

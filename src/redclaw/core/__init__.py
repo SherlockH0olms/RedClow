@@ -7,6 +7,11 @@ from .orchestrator import ScenarioOrchestrator, ScenarioState, AgentTask, Attack
 from .state_machine import StateMachine, Phase, ActionResult, WorkflowContext
 from .memory import MemoryManager, MemoryEntry, AttackPattern
 from .rag import RAGSystem, RAGDocument, RAGResult
+from .config import (
+    RedClawConfig, LLMConfig, AgentConfig, ToolConfig,
+    LLMBackend, BACKEND_PRESETS, get_config, configure_backend
+)
+from .llm_manager import LLMManager, get_llm_manager, configure_llm
 
 __all__ = [
     # LLM
@@ -15,6 +20,19 @@ __all__ = [
     "LLMResponse",
     "StreamChunk",
     "get_llm_client",
+    # LLM Manager
+    "LLMManager",
+    "get_llm_manager",
+    "configure_llm",
+    # Config
+    "RedClawConfig",
+    "LLMConfig",
+    "AgentConfig",
+    "ToolConfig",
+    "LLMBackend",
+    "BACKEND_PRESETS",
+    "get_config",
+    "configure_backend",
     # Orchestrator
     "ScenarioOrchestrator",
     "ScenarioState",
@@ -34,3 +52,4 @@ __all__ = [
     "RAGDocument",
     "RAGResult",
 ]
+
