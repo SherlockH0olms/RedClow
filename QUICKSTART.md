@@ -8,7 +8,7 @@
 
 ```bash
 # Clone and install on Kali
-git clone https://github.com/your-org/redclaw.git && cd redclaw && ./install.sh
+git clone https://github.com/SherlockH0olms/RedClow.git && cd RedClow && pip3 install -e .
 ```
 
 ---
