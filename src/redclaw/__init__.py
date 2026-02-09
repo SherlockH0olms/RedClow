@@ -1,63 +1,177 @@
 """
-RedClaw - Autonomous Penetration Testing System
+RedClaw v2 - Advanced Autonomous Red Team AI Agent
+===================================================
 
-A local LLM-powered autonomous penetration testing framework
-inspired by Claude Code's agentic architecture.
+A production-ready AI-powered penetration testing framework
+with advanced offensive capabilities, local LLM integration,
+and comprehensive security tool orchestration.
+
+Components:
+- Core: LLM client, orchestrator, state machine, memory, RAG
+- Agents: Recon, Exploit, Post-Exploitation specialists
+- AI RedTeam: PyRIT, AutoRedTeamer, HARM, Curiosity Agent
+- Engines: CALDERA, Metasploit, HexStrike clients
+- CLI: Interactive Claude Code-like interface
+
+Usage:
+    from redclaw import RedClawLLM, ScenarioOrchestrator, ReconAgent
+    from redclaw.cli import RedClawApp
+    
+    app = RedClawApp()
+    app.run()
 """
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 __author__ = "SparkStack Systems"
-__description__ = "Autonomous Penetration Testing System"
 
-# Core components
-from .core.llm_client import RedClawLLM, get_llm_client
-from .core.orchestrator import AgentOrchestrator
-from .core.state_machine import StateMachine
-from .core.memory import MemoryManager, get_memory_manager
-from .core.rag import RAGSystem, get_rag_system
+# Core components (matching actual exports from core/__init__.py)
+from .core import (
+    RedClawLLM,
+    Message,
+    LLMResponse,
+    StreamChunk,
+    get_llm_client,
+    ScenarioOrchestrator,
+    ScenarioState,
+    AgentTask,
+    AttackPlan,
+    StateMachine,
+    Phase,
+    ActionResult,
+    WorkflowContext,
+    MemoryManager,
+    MemoryEntry,
+    AttackPattern,
+    RAGSystem,
+    RAGDocument,
+    RAGResult,
+)
 
 # Agents
-from .agents.recon_agent import ReconAgent
-from .agents.scanning_agent import ScanningAgent
-from .agents.exploitation_agent import ExploitationAgent
-from .agents.post_exploitation_agent import PostExploitationAgent
-from .agents.reporting_agent import ReportingAgent
+from .agents import (
+    BaseAgent,
+    AgentCapability,
+    AgentResult,
+    AgentState,
+    ReconAgent,
+    ReconFinding,
+    ExploitAgent,
+    ExploitChainAgent,
+    ExploitAttempt,
+    PostExploitAgent,
+    CollectedData,
+)
 
-# Tools
-from .tools.executor import ToolExecutor
+# AI Red Teaming
+from .ai_redteam import (
+    PyRITClient,
+    AttackStrategy,
+    AttackResult as PyRITAttackResult,
+    PyRITSession,
+    AutoRedTeamer,
+    RedTeamSession,
+    AttackPhase,
+    HARMFramework,
+    HarmCategory,
+    HarmReport,
+    HarmSeverity,
+    CuriosityAgent,
+    CuriositySession,
+    ExplorationState,
+)
 
-# Integrations
-from .integrations.hexstrike import HexStrikeClient, get_hexstrike_client
-from .integrations.database import DatabaseManager, get_database
+# Engines
+from .engines import (
+    CALDERAClient,
+    Operation,
+    Agent as CALDERAAgent,
+    Ability,
+    OperationState,
+    MetasploitClient,
+    MsfSession,
+    MsfJob,
+    ExploitResult,
+    HexStrikeClient,
+    HexStrikeFallback,
+    ScanType,
+    AttackType,
+    ScanResult,
+    AttackResult as HexStrikeAttackResult,
+)
+
+# CLI
+from .cli import RedClawApp
 
 __all__ = [
     # Version
     "__version__",
-    "__author__",
-    
-    # Core
+    # Core - LLM
     "RedClawLLM",
+    "Message",
+    "LLMResponse",
+    "StreamChunk",
     "get_llm_client",
-    "AgentOrchestrator",
+    # Core - Orchestrator
+    "ScenarioOrchestrator",
+    "ScenarioState",
+    "AgentTask",
+    "AttackPlan",
+    # Core - State Machine
     "StateMachine",
+    "Phase",
+    "ActionResult",
+    "WorkflowContext",
+    # Core - Memory
     "MemoryManager",
-    "get_memory_manager",
+    "MemoryEntry",
+    "AttackPattern",
+    # Core - RAG
     "RAGSystem",
-    "get_rag_system",
-    
+    "RAGDocument",
+    "RAGResult",
     # Agents
+    "BaseAgent",
+    "AgentCapability",
+    "AgentResult",
+    "AgentState",
     "ReconAgent",
-    "ScanningAgent",
-    "ExploitationAgent",
-    "PostExploitationAgent",
-    "ReportingAgent",
-    
-    # Tools
-    "ToolExecutor",
-    
-    # Integrations
+    "ReconFinding",
+    "ExploitAgent",
+    "ExploitChainAgent",
+    "ExploitAttempt",
+    "PostExploitAgent",
+    "CollectedData",
+    # AI RedTeam
+    "PyRITClient",
+    "AttackStrategy",
+    "PyRITAttackResult",
+    "PyRITSession",
+    "AutoRedTeamer",
+    "RedTeamSession",
+    "AttackPhase",
+    "HARMFramework",
+    "HarmCategory",
+    "HarmReport",
+    "HarmSeverity",
+    "CuriosityAgent",
+    "CuriositySession",
+    "ExplorationState",
+    # Engines
+    "CALDERAClient",
+    "Operation",
+    "CALDERAAgent",
+    "Ability",
+    "OperationState",
+    "MetasploitClient",
+    "MsfSession",
+    "MsfJob",
+    "ExploitResult",
     "HexStrikeClient",
-    "get_hexstrike_client",
-    "DatabaseManager",
-    "get_database"
+    "HexStrikeFallback",
+    "ScanType",
+    "AttackType",
+    "HexStrikeAttackResult",
+    "ScanResult",
+    # CLI
+    "RedClawApp",
 ]

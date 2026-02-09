@@ -1,420 +1,462 @@
 """
-RedClaw - RAG (Retrieval-Augmented Generation) System
-CVE database, exploit database, attack patterns
+RedClaw Core - RAG System
+Retrieval-Augmented Generation with security knowledge bases
 """
 
+import os
+import json
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-import json
-import os
+import hashlib
 
 try:
     import chromadb
+    from chromadb.config import Settings
     CHROMA_AVAILABLE = True
 except ImportError:
     CHROMA_AVAILABLE = False
 
-try:
-    from sentence_transformers import SentenceTransformer
-    EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    EMBEDDINGS_AVAILABLE = False
+
+@dataclass
+class RAGDocument:
+    """Document in RAG system"""
+    id: str
+    content: str
+    source: str  # cve, exploit, mitre, custom
+    metadata: Dict
 
 
 @dataclass
-class CVEEntry:
-    """CVE database entry"""
-    cve_id: str
-    description: str
-    severity: str
-    cvss_score: float
-    affected_products: List[str]
-    references: List[str]
-    exploit_available: bool = False
-
-
-@dataclass
-class ExploitEntry:
-    """Exploit database entry"""
-    exploit_id: str
-    title: str
-    type: str  # remote, local, web, dos
-    platform: str
-    author: str
-    date: str
-    cve: Optional[str]
-    path: str
-
-
-@dataclass
-class AttackTechnique:
-    """MITRE ATT&CK technique"""
-    technique_id: str
-    name: str
-    tactic: str
-    description: str
-    detection: str
-    mitigations: List[str]
+class RAGResult:
+    """RAG search result"""
+    document: RAGDocument
+    score: float
+    highlights: List[str] = None
 
 
 class RAGSystem:
     """
-    Retrieval-Augmented Generation System
+    RAG System for Security Knowledge
     
     Knowledge bases:
-    - CVE database
+    - CVE Database
     - ExploitDB
     - MITRE ATT&CK
-    - Custom attack patterns
-    
-    Features:
-    - Semantic search with embeddings
-    - Context retrieval for LLM prompts
-    - Auto-update from online sources
+    - Custom techniques
     """
     
-    def __init__(self, data_dir: str = "./data/rag"):
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        
-        # In-memory caches
-        self.cve_cache: Dict[str, CVEEntry] = {}
-        self.exploit_cache: Dict[str, ExploitEntry] = {}
-        self.technique_cache: Dict[str, AttackTechnique] = {}
-        
-        # Embedding model
-        self.embedder = None
-        if EMBEDDINGS_AVAILABLE:
-            try:
-                self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            except Exception:
-                pass
-        
-        # ChromaDB collections
-        self.chroma_client = None
-        self.cve_collection = None
-        self.exploit_collection = None
-        self.technique_collection = None
+    COLLECTIONS = {
+        "cve": "redclaw_cve",
+        "exploit": "redclaw_exploits",
+        "mitre": "redclaw_mitre",
+        "techniques": "redclaw_techniques"
+    }
+    
+    def __init__(
+        self,
+        persist_dir: str = "./data/rag",
+        auto_load: bool = True
+    ):
+        self.persist_dir = persist_dir
+        os.makedirs(persist_dir, exist_ok=True)
         
         if CHROMA_AVAILABLE:
-            self._init_chromadb()
+            self.client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            self._init_collections()
+        else:
+            self.client = None
+            self._init_fallback()
         
-        # Load local data
-        self._load_local_data()
+        if auto_load:
+            self._load_builtin_knowledge()
     
-    def _init_chromadb(self):
+    def _init_collections(self):
         """Initialize ChromaDB collections"""
-        try:
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(self.data_dir / "chroma")
+        self.collections = {}
+        for name, collection_name in self.COLLECTIONS.items():
+            self.collections[name] = self.client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"}
             )
+    
+    def _init_fallback(self):
+        """Initialize fallback storage"""
+        self.fallback_file = os.path.join(self.persist_dir, "rag.json")
+        if os.path.exists(self.fallback_file):
+            with open(self.fallback_file, "r") as f:
+                self.fallback_data = json.load(f)
+        else:
+            self.fallback_data = {k: [] for k in self.COLLECTIONS}
+    
+    def _save_fallback(self):
+        """Save fallback data"""
+        if not CHROMA_AVAILABLE:
+            with open(self.fallback_file, "w") as f:
+                json.dump(self.fallback_data, f, indent=2)
+    
+    def _load_builtin_knowledge(self):
+        """Load built-in security knowledge"""
+        knowledge_dir = os.path.join(os.path.dirname(__file__), "..", "knowledge")
+        
+        # Load MITRE ATT&CK basics
+        mitre_data = self._get_basic_mitre()
+        for technique in mitre_data:
+            self.add_document(
+                collection="mitre",
+                doc_id=technique["id"],
+                content=f"{technique['name']}\n{technique['description']}",
+                metadata=technique
+            )
+        
+        # Load common exploit patterns
+        exploits = self._get_common_exploits()
+        for exploit in exploits:
+            self.add_document(
+                collection="exploit",
+                doc_id=exploit["id"],
+                content=f"{exploit['name']}\n{exploit['description']}",
+                metadata=exploit
+            )
+    
+    def _get_basic_mitre(self) -> List[Dict]:
+        """Basic MITRE ATT&CK techniques"""
+        return [
+            {
+                "id": "T1566",
+                "name": "Phishing",
+                "tactic": "initial-access",
+                "description": "Adversaries may send phishing messages to gain access to victim systems."
+            },
+            {
+                "id": "T1059",
+                "name": "Command and Scripting Interpreter",
+                "tactic": "execution",
+                "description": "Adversaries may abuse command and script interpreters to execute commands."
+            },
+            {
+                "id": "T1078",
+                "name": "Valid Accounts",
+                "tactic": "persistence",
+                "description": "Adversaries may obtain and abuse credentials of existing accounts."
+            },
+            {
+                "id": "T1548",
+                "name": "Abuse Elevation Control Mechanism",
+                "tactic": "privilege-escalation",
+                "description": "Adversaries may circumvent mechanisms designed to control elevate privileges."
+            },
+            {
+                "id": "T1070",
+                "name": "Indicator Removal",
+                "tactic": "defense-evasion",
+                "description": "Adversaries may delete or modify artifacts to avoid detection."
+            },
+            {
+                "id": "T1003",
+                "name": "OS Credential Dumping",
+                "tactic": "credential-access",
+                "description": "Adversaries may attempt to dump credentials from the operating system."
+            },
+            {
+                "id": "T1087",
+                "name": "Account Discovery",
+                "tactic": "discovery",
+                "description": "Adversaries may attempt to get a listing of accounts on a system."
+            },
+            {
+                "id": "T1021",
+                "name": "Remote Services",
+                "tactic": "lateral-movement",
+                "description": "Adversaries may use remote services to move laterally."
+            },
+            {
+                "id": "T1005",
+                "name": "Data from Local System",
+                "tactic": "collection",
+                "description": "Adversaries may search local system sources for data of interest."
+            },
+            {
+                "id": "T1048",
+                "name": "Exfiltration Over Alternative Protocol",
+                "tactic": "exfiltration",
+                "description": "Adversaries may steal data by exfiltrating it over a different protocol."
+            }
+        ]
+    
+    def _get_common_exploits(self) -> List[Dict]:
+        """Common exploit patterns"""
+        return [
+            {
+                "id": "EXP001",
+                "name": "SQL Injection",
+                "type": "web",
+                "description": "SQL injection attacks via user-supplied input to database queries.",
+                "severity": "high"
+            },
+            {
+                "id": "EXP002",
+                "name": "XSS - Cross-Site Scripting",
+                "type": "web",
+                "description": "Injection of malicious scripts into web pages viewed by other users.",
+                "severity": "medium"
+            },
+            {
+                "id": "EXP003",
+                "name": "Remote Code Execution",
+                "type": "network",
+                "description": "Vulnerabilities allowing execution of arbitrary code on remote systems.",
+                "severity": "critical"
+            },
+            {
+                "id": "EXP004",
+                "name": "Path Traversal",
+                "type": "web",
+                "description": "Access to files outside the web root directory using ../ sequences.",
+                "severity": "high"
+            },
+            {
+                "id": "EXP005",
+                "name": "Command Injection",
+                "type": "web",
+                "description": "Execution of arbitrary OS commands on the host server.",
+                "severity": "critical"
+            },
+            {
+                "id": "EXP006",
+                "name": "Buffer Overflow",
+                "type": "binary",
+                "description": "Writing data beyond buffer boundaries to execute arbitrary code.",
+                "severity": "critical"
+            },
+            {
+                "id": "EXP007",
+                "name": "SSRF - Server-Side Request Forgery",
+                "type": "web",
+                "description": "Force server to make requests to unintended locations.",
+                "severity": "high"
+            },
+            {
+                "id": "EXP008",
+                "name": "Deserialization Attack",
+                "type": "application",
+                "description": "Exploit unsafe deserialization of user-controlled data.",
+                "severity": "critical"
+            }
+        ]
+    
+    def add_document(
+        self,
+        collection: str,
+        doc_id: str,
+        content: str,
+        metadata: Dict = None
+    ) -> bool:
+        """Add document to collection"""
+        
+        if collection not in self.COLLECTIONS:
+            return False
+        
+        meta = metadata or {}
+        meta["added_at"] = datetime.now().isoformat()
+        
+        if CHROMA_AVAILABLE:
+            try:
+                self.collections[collection].upsert(
+                    ids=[doc_id],
+                    documents=[content],
+                    metadatas=[meta]
+                )
+                return True
+            except Exception:
+                return False
+        else:
+            # Fallback
+            doc = {"id": doc_id, "content": content, "metadata": meta}
+            # Update or add
+            updated = False
+            for i, d in enumerate(self.fallback_data[collection]):
+                if d["id"] == doc_id:
+                    self.fallback_data[collection][i] = doc
+                    updated = True
+                    break
+            if not updated:
+                self.fallback_data[collection].append(doc)
+            self._save_fallback()
+            return True
+    
+    def search(
+        self,
+        query: str,
+        collections: List[str] = None,
+        n_results: int = 5,
+        filters: Dict = None
+    ) -> List[RAGResult]:
+        """Search across collections"""
+        
+        search_collections = collections or list(self.COLLECTIONS.keys())
+        results = []
+        
+        for coll_name in search_collections:
+            if coll_name not in self.COLLECTIONS:
+                continue
             
-            self.cve_collection = self.chroma_client.get_or_create_collection(
-                name="cve_database"
-            )
-            self.exploit_collection = self.chroma_client.get_or_create_collection(
-                name="exploit_database"
-            )
-            self.technique_collection = self.chroma_client.get_or_create_collection(
-                name="attack_techniques"
-            )
-        except Exception as e:
-            print(f"ChromaDB init failed: {e}")
+            if CHROMA_AVAILABLE:
+                try:
+                    coll_results = self.collections[coll_name].query(
+                        query_texts=[query],
+                        n_results=n_results,
+                        where=filters
+                    )
+                    
+                    if coll_results["ids"]:
+                        for i, doc_id in enumerate(coll_results["ids"][0]):
+                            doc = RAGDocument(
+                                id=doc_id,
+                                content=coll_results["documents"][0][i],
+                                source=coll_name,
+                                metadata=coll_results["metadatas"][0][i]
+                            )
+                            score = 1.0 - (coll_results["distances"][0][i] if coll_results["distances"] else 0)
+                            results.append(RAGResult(document=doc, score=score))
+                except Exception:
+                    pass
+            else:
+                # Fallback search
+                query_lower = query.lower()
+                for doc in self.fallback_data.get(coll_name, []):
+                    if query_lower in doc["content"].lower():
+                        results.append(RAGResult(
+                            document=RAGDocument(
+                                id=doc["id"],
+                                content=doc["content"],
+                                source=coll_name,
+                                metadata=doc["metadata"]
+                            ),
+                            score=0.8
+                        ))
+        
+        # Sort by score and limit
+        results.sort(key=lambda r: -r.score)
+        return results[:n_results]
     
-    def _load_local_data(self):
-        """Load data from local JSON files"""
-        # Load CVEs
-        cve_file = self.data_dir / "cve_cache.json"
-        if cve_file.exists():
-            with open(cve_file) as f:
-                data = json.load(f)
-                for cve_data in data:
-                    cve = CVEEntry(**cve_data)
-                    self.cve_cache[cve.cve_id] = cve
+    def get_context_for_target(
+        self,
+        target_type: str,
+        technologies: List[str] = None
+    ) -> str:
+        """Get relevant context for LLM based on target"""
         
-        # Load exploits
-        exploit_file = self.data_dir / "exploit_cache.json"
-        if exploit_file.exists():
-            with open(exploit_file) as f:
-                data = json.load(f)
-                for exp_data in data:
-                    exp = ExploitEntry(**exp_data)
-                    self.exploit_cache[exp.exploit_id] = exp
+        # Search for relevant techniques
+        technique_results = self.search(
+            target_type,
+            collections=["mitre", "exploit"],
+            n_results=5
+        )
         
-        # Load techniques
-        technique_file = self.data_dir / "technique_cache.json"
-        if technique_file.exists():
-            with open(technique_file) as f:
-                data = json.load(f)
-                for tech_data in data:
-                    tech = AttackTechnique(**tech_data)
-                    self.technique_cache[tech.technique_id] = tech
-    
-    def _save_local_data(self):
-        """Save data to local JSON files"""
-        # Save CVEs
-        cve_data = [
-            {
-                "cve_id": c.cve_id,
-                "description": c.description,
-                "severity": c.severity,
-                "cvss_score": c.cvss_score,
-                "affected_products": c.affected_products,
-                "references": c.references,
-                "exploit_available": c.exploit_available
-            }
-            for c in self.cve_cache.values()
-        ]
-        with open(self.data_dir / "cve_cache.json", 'w') as f:
-            json.dump(cve_data, f, indent=2)
+        if technologies:
+            for tech in technologies:
+                tech_results = self.search(tech, n_results=3)
+                technique_results.extend(tech_results)
         
-        # Save exploits
-        exploit_data = [
-            {
-                "exploit_id": e.exploit_id,
-                "title": e.title,
-                "type": e.type,
-                "platform": e.platform,
-                "author": e.author,
-                "date": e.date,
-                "cve": e.cve,
-                "path": e.path
-            }
-            for e in self.exploit_cache.values()
-        ]
-        with open(self.data_dir / "exploit_cache.json", 'w') as f:
-            json.dump(exploit_data, f, indent=2)
-    
-    def add_cve(self, cve: CVEEntry):
-        """Add CVE to database"""
-        self.cve_cache[cve.cve_id] = cve
+        # Format as context
+        context_parts = []
+        seen = set()
         
-        if self.cve_collection:
-            doc = f"{cve.cve_id}: {cve.description}"
-            self.cve_collection.add(
-                documents=[doc],
-                metadatas=[{
-                    "severity": cve.severity,
-                    "cvss": str(cve.cvss_score),
-                    "exploit_available": str(cve.exploit_available)
-                }],
-                ids=[cve.cve_id]
-            )
-    
-    def add_exploit(self, exploit: ExploitEntry):
-        """Add exploit to database"""
-        self.exploit_cache[exploit.exploit_id] = exploit
+        for result in technique_results:
+            if result.document.id in seen:
+                continue
+            seen.add(result.document.id)
+            
+            context_parts.append(f"""
+### {result.document.metadata.get('name', result.document.id)}
+Source: {result.document.source.upper()}
+{result.document.content[:500]}
+""")
         
-        if self.exploit_collection:
-            doc = f"{exploit.title} ({exploit.type}, {exploit.platform})"
-            self.exploit_collection.add(
-                documents=[doc],
-                metadatas=[{
-                    "type": exploit.type,
-                    "platform": exploit.platform,
-                    "cve": exploit.cve or ""
-                }],
-                ids=[exploit.exploit_id]
-            )
+        return "\n".join(context_parts[:10])
     
     def search_cve(
         self,
         query: str,
-        n_results: int = 5,
-        min_cvss: float = None
-    ) -> List[CVEEntry]:
+        n_results: int = 5
+    ) -> List[RAGResult]:
         """Search CVE database"""
-        if self.cve_collection:
-            results = self.cve_collection.query(
-                query_texts=[query],
-                n_results=n_results
-            )
-            
-            cves = []
-            for cve_id in results['ids'][0]:
-                if cve_id in self.cve_cache:
-                    cve = self.cve_cache[cve_id]
-                    if min_cvss is None or cve.cvss_score >= min_cvss:
-                        cves.append(cve)
-            return cves
-        
-        # Fallback: simple search
-        query_lower = query.lower()
-        matches = [
-            c for c in self.cve_cache.values()
-            if query_lower in c.description.lower() or query_lower in c.cve_id.lower()
-        ]
-        
-        if min_cvss:
-            matches = [c for c in matches if c.cvss_score >= min_cvss]
-        
-        return matches[:n_results]
+        return self.search(query, collections=["cve"], n_results=n_results)
     
     def search_exploits(
         self,
         query: str,
-        n_results: int = 5,
         exploit_type: str = None,
-        platform: str = None
-    ) -> List[ExploitEntry]:
+        n_results: int = 5
+    ) -> List[RAGResult]:
         """Search exploit database"""
-        if self.exploit_collection:
-            where_filter = {}
-            if exploit_type:
-                where_filter["type"] = exploit_type
-            if platform:
-                where_filter["platform"] = platform
-            
-            results = self.exploit_collection.query(
-                query_texts=[query],
-                n_results=n_results,
-                where=where_filter if where_filter else None
-            )
-            
-            exploits = []
-            for exp_id in results['ids'][0]:
-                if exp_id in self.exploit_cache:
-                    exploits.append(self.exploit_cache[exp_id])
-            return exploits
-        
-        # Fallback
-        query_lower = query.lower()
-        matches = [
-            e for e in self.exploit_cache.values()
-            if query_lower in e.title.lower()
-        ]
-        
-        if exploit_type:
-            matches = [e for e in matches if e.type == exploit_type]
-        if platform:
-            matches = [e for e in matches if platform in e.platform.lower()]
-        
-        return matches[:n_results]
+        filters = {"type": exploit_type} if exploit_type else None
+        return self.search(query, collections=["exploit"], n_results=n_results, filters=filters)
     
-    def search_techniques(
+    def search_mitre(
         self,
         query: str,
-        n_results: int = 5,
-        tactic: str = None
-    ) -> List[AttackTechnique]:
-        """Search MITRE ATT&CK techniques"""
-        if self.technique_collection:
-            where_filter = {"tactic": tactic} if tactic else None
+        tactic: str = None,
+        n_results: int = 5
+    ) -> List[RAGResult]:
+        """Search MITRE ATT&CK"""
+        filters = {"tactic": tactic} if tactic else None
+        return self.search(query, collections=["mitre"], n_results=n_results, filters=filters)
+    
+    def import_cve_data(self, cve_file: str) -> int:
+        """Import CVE data from JSON file"""
+        if not os.path.exists(cve_file):
+            return 0
+        
+        count = 0
+        with open(cve_file, "r") as f:
+            data = json.load(f)
+        
+        cves = data if isinstance(data, list) else data.get("CVE_Items", [])
+        
+        for cve in cves:
+            cve_id = cve.get("cve", {}).get("CVE_data_meta", {}).get("ID", "")
+            if not cve_id:
+                continue
             
-            results = self.technique_collection.query(
-                query_texts=[query],
-                n_results=n_results,
-                where=where_filter
-            )
+            desc = ""
+            desc_data = cve.get("cve", {}).get("description", {}).get("description_data", [])
+            if desc_data:
+                desc = desc_data[0].get("value", "")
             
-            techniques = []
-            for tech_id in results['ids'][0]:
-                if tech_id in self.technique_cache:
-                    techniques.append(self.technique_cache[tech_id])
-            return techniques
-        
-        # Fallback
-        query_lower = query.lower()
-        matches = [
-            t for t in self.technique_cache.values()
-            if query_lower in t.name.lower() or query_lower in t.description.lower()
-        ]
-        
-        if tactic:
-            matches = [t for t in matches if t.tactic == tactic]
-        
-        return matches[:n_results]
-    
-    def get_context_for_service(
-        self,
-        service: str,
-        version: str = ""
-    ) -> str:
-        """Get RAG context for a service"""
-        query = f"{service} {version}".strip()
-        
-        context_parts = []
-        
-        # Search CVEs
-        cves = self.search_cve(query, n_results=3)
-        if cves:
-            context_parts.append("**Known CVEs:**")
-            for cve in cves:
-                context_parts.append(
-                    f"- {cve.cve_id} (CVSS: {cve.cvss_score}): {cve.description[:200]}"
-                )
-        
-        # Search exploits
-        exploits = self.search_exploits(query, n_results=3)
-        if exploits:
-            context_parts.append("\n**Available Exploits:**")
-            for exp in exploits:
-                context_parts.append(f"- {exp.title} ({exp.type})")
-        
-        return "\n".join(context_parts)
-    
-    def get_attack_context(
-        self,
-        phase: str,
-        target_info: Dict
-    ) -> str:
-        """Get RAG context for attack phase"""
-        context_parts = []
-        
-        # Map phase to MITRE tactics
-        phase_to_tactic = {
-            "reconnaissance": "reconnaissance",
-            "scanning": "discovery",
-            "exploitation": "initial-access",
-            "post_exploitation": "persistence",
-            "lateral_movement": "lateral-movement"
-        }
-        
-        tactic = phase_to_tactic.get(phase)
-        if tactic:
-            techniques = self.search_techniques("", n_results=5, tactic=tactic)
-            if techniques:
-                context_parts.append(f"**{tactic.upper()} Techniques:**")
-                for tech in techniques:
-                    context_parts.append(f"- {tech.technique_id}: {tech.name}")
-        
-        # Add service-specific context
-        services = target_info.get("services", [])
-        for svc in services[:3]:
-            svc_context = self.get_context_for_service(
-                svc.get("service", ""),
-                svc.get("version", "")
+            self.add_document(
+                collection="cve",
+                doc_id=cve_id,
+                content=f"{cve_id}\n{desc}",
+                metadata={
+                    "cve_id": cve_id,
+                    "description": desc,
+                    "published": cve.get("publishedDate", "")
+                }
             )
-            if svc_context:
-                context_parts.append(f"\n**{svc.get('service', 'Service')}:**")
-                context_parts.append(svc_context)
+            count += 1
         
-        return "\n".join(context_parts)
+        return count
     
-    async def update_from_nvd(self, api_key: str = None):
-        """Update CVE database from NVD"""
-        # NVD API integration would go here
-        # For now, just log
-        print("NVD update would be performed here")
-    
-    async def update_from_exploitdb(self):
-        """Update exploit database from ExploitDB"""
-        # ExploitDB integration would go here
-        print("ExploitDB update would be performed here")
-
-
-# Singleton
-_rag_system: Optional[RAGSystem] = None
-
-
-def get_rag_system(data_dir: str = None) -> RAGSystem:
-    """Get RAG system instance"""
-    global _rag_system
-    
-    if _rag_system is None:
-        data_dir = data_dir or os.getenv("WORKSPACE_PATH", "./data/rag")
-        _rag_system = RAGSystem(data_dir)
-    
-    return _rag_system
+    def get_stats(self) -> Dict:
+        """Get RAG system statistics"""
+        if CHROMA_AVAILABLE:
+            return {
+                "cve_count": self.collections["cve"].count(),
+                "exploit_count": self.collections["exploit"].count(),
+                "mitre_count": self.collections["mitre"].count(),
+                "techniques_count": self.collections["techniques"].count(),
+                "using_chromadb": True
+            }
+        else:
+            return {
+                "cve_count": len(self.fallback_data.get("cve", [])),
+                "exploit_count": len(self.fallback_data.get("exploit", [])),
+                "mitre_count": len(self.fallback_data.get("mitre", [])),
+                "techniques_count": len(self.fallback_data.get("techniques", [])),
+                "using_chromadb": False
+            }

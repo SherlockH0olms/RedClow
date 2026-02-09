@@ -1,5 +1,7 @@
-"""RedClaw CLI Module"""
+"""
+RedClaw CLI Package
+"""
 
-from .main import RedClawCLI, main
+from .app import RedClawApp, main, cli_entry
 
-__all__ = ["RedClawCLI", "main"]
+__all__ = ["RedClawApp", "main", "cli_entry"]

@@ -1,40 +1,36 @@
 """
-RedClaw - State Machine Controller
-Phase tracking, error handling, retry logic
+RedClaw Core - State Machine
+PTES-based workflow state management
 """
 
-from typing import Dict, List, Optional, Any, Callable
+from enum import Enum
+from typing import Optional, Dict, Any, Callable, List
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-import asyncio
-import json
 
 
 class Phase(Enum):
-    """Penetration testing phases"""
-    INIT = "init"
+    """Penetration Testing Execution Standard phases"""
+    PRE_ENGAGEMENT = "pre_engagement"
     RECONNAISSANCE = "reconnaissance"
     SCANNING = "scanning"
     ENUMERATION = "enumeration"
+    VULNERABILITY_ANALYSIS = "vulnerability_analysis"
     EXPLOITATION = "exploitation"
     POST_EXPLOITATION = "post_exploitation"
-    LATERAL_MOVEMENT = "lateral_movement"
-    DATA_EXFILTRATION = "data_exfiltration"
-    CLEANUP = "cleanup"
     REPORTING = "reporting"
-    COMPLETE = "complete"
+    COMPLETED = "completed"
     ERROR = "error"
 
 
-class ActionResult(Enum):
+@dataclass
+class ActionResult:
     """Result of an action"""
-    SUCCESS = "success"
-    FAILURE = "failure"
-    PARTIAL = "partial"
-    SKIPPED = "skipped"
-    TIMEOUT = "timeout"
-    BLOCKED = "blocked"
+    success: bool
+    data: Any = None
+    error: Optional[str] = None
+    next_phase: Optional[Phase] = None
+    artifacts: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -42,341 +38,244 @@ class StateTransition:
     """State transition record"""
     from_phase: Phase
     to_phase: Phase
-    reason: str
+    trigger: str
     timestamp: datetime = field(default_factory=datetime.now)
-
-
-@dataclass
-class ActionRecord:
-    """Record of an action taken"""
-    action_id: str
-    phase: Phase
-    action_type: str
-    description: str
-    result: ActionResult
-    output: str
-    duration_ms: int
-    retry_count: int = 0
-    timestamp: datetime = field(default_factory=datetime.now)
+    data: Dict = field(default_factory=dict)
 
 
 class StateMachine:
     """
-    State Machine Controller
+    PTES State Machine
     
-    Features:
-    - Phase tracking (PTES methodology)
-    - Transition validation
-    - Error handling & recovery
-    - Retry logic with exponential backoff
-    - State persistence
+    Manages workflow state transitions with:
+    - Valid transition enforcement
+    - Error handling and recovery
+    - State history tracking
+    - Callback hooks
     """
     
-    # Valid phase transitions
-    VALID_TRANSITIONS = {
-        Phase.INIT: [Phase.RECONNAISSANCE, Phase.ERROR],
-        Phase.RECONNAISSANCE: [Phase.SCANNING, Phase.ERROR],
-        Phase.SCANNING: [Phase.ENUMERATION, Phase.EXPLOITATION, Phase.ERROR],
-        Phase.ENUMERATION: [Phase.EXPLOITATION, Phase.ERROR],
-        Phase.EXPLOITATION: [Phase.POST_EXPLOITATION, Phase.SCANNING, Phase.ERROR],
-        Phase.POST_EXPLOITATION: [Phase.LATERAL_MOVEMENT, Phase.DATA_EXFILTRATION, Phase.CLEANUP, Phase.ERROR],
-        Phase.LATERAL_MOVEMENT: [Phase.EXPLOITATION, Phase.POST_EXPLOITATION, Phase.CLEANUP, Phase.ERROR],
-        Phase.DATA_EXFILTRATION: [Phase.CLEANUP, Phase.ERROR],
-        Phase.CLEANUP: [Phase.REPORTING, Phase.ERROR],
-        Phase.REPORTING: [Phase.COMPLETE, Phase.ERROR],
-        Phase.ERROR: [Phase.RECONNAISSANCE, Phase.SCANNING, Phase.CLEANUP, Phase.COMPLETE],
+    # Valid state transitions
+    TRANSITIONS = {
+        Phase.PRE_ENGAGEMENT: [Phase.RECONNAISSANCE, Phase.ERROR],
+        Phase.RECONNAISSANCE: [Phase.SCANNING, Phase.ERROR, Phase.REPORTING],
+        Phase.SCANNING: [Phase.ENUMERATION, Phase.VULNERABILITY_ANALYSIS, Phase.ERROR, Phase.REPORTING],
+        Phase.ENUMERATION: [Phase.VULNERABILITY_ANALYSIS, Phase.SCANNING, Phase.ERROR, Phase.REPORTING],
+        Phase.VULNERABILITY_ANALYSIS: [Phase.EXPLOITATION, Phase.ENUMERATION, Phase.ERROR, Phase.REPORTING],
+        Phase.EXPLOITATION: [Phase.POST_EXPLOITATION, Phase.VULNERABILITY_ANALYSIS, Phase.ERROR, Phase.REPORTING],
+        Phase.POST_EXPLOITATION: [Phase.REPORTING, Phase.EXPLOITATION, Phase.ERROR],
+        Phase.REPORTING: [Phase.COMPLETED],
+        Phase.COMPLETED: [],
+        Phase.ERROR: [Phase.PRE_ENGAGEMENT, Phase.RECONNAISSANCE]  # Recovery options
     }
     
-    # Max retries per phase
-    MAX_RETRIES = 3
-    
-    # Backoff settings (ms)
-    BASE_BACKOFF_MS = 1000
-    MAX_BACKOFF_MS = 30000
-    
-    def __init__(self, session_id: str = None):
-        self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.current_phase = Phase.INIT
-        self.previous_phase: Optional[Phase] = None
-        self.transitions: List[StateTransition] = []
-        self.actions: List[ActionRecord] = []
-        self.phase_retries: Dict[Phase, int] = {}
-        self.callbacks: List[Callable] = []
-        self.paused = False
-        self.error_message: Optional[str] = None
-    
-    def add_callback(self, callback: Callable):
-        """Add state change callback"""
-        self.callbacks.append(callback)
-    
-    def _notify_callbacks(self, event: str, data: Dict = None):
-        """Notify all callbacks"""
-        for cb in self.callbacks:
-            try:
-                cb(event, data or {})
-            except Exception as e:
-                print(f"Callback error: {e}")
+    def __init__(self, initial_phase: Phase = Phase.PRE_ENGAGEMENT):
+        self.current_phase = initial_phase
+        self.history: List[StateTransition] = []
+        self.callbacks: Dict[str, List[Callable]] = {
+            "on_enter": [],
+            "on_exit": [],
+            "on_error": []
+        }
+        self.error_count = 0
+        self.max_retries = 3
     
     def can_transition(self, to_phase: Phase) -> bool:
         """Check if transition is valid"""
-        if self.current_phase == Phase.COMPLETE:
+        return to_phase in self.TRANSITIONS.get(self.current_phase, [])
+    
+    def transition(self, to_phase: Phase, trigger: str = "auto", data: Dict = None) -> bool:
+        """
+        Transition to new phase
+        
+        Args:
+            to_phase: Target phase
+            trigger: What triggered this transition
+            data: Optional context data
+            
+        Returns:
+            True if transition successful
+        """
+        if not self.can_transition(to_phase):
             return False
         
-        valid_next = self.VALID_TRANSITIONS.get(self.current_phase, [])
-        return to_phase in valid_next
-    
-    def transition(self, to_phase: Phase, reason: str = "") -> bool:
-        """Transition to new phase"""
-        if not self.can_transition(to_phase):
-            self._notify_callbacks("invalid_transition", {
-                "from": self.current_phase.value,
-                "to": to_phase.value
-            })
-            return False
+        # Exit callbacks
+        for callback in self.callbacks["on_exit"]:
+            try:
+                callback(self.current_phase, to_phase, data)
+            except:
+                pass
         
         # Record transition
         transition = StateTransition(
             from_phase=self.current_phase,
             to_phase=to_phase,
-            reason=reason
+            trigger=trigger,
+            data=data or {}
         )
-        self.transitions.append(transition)
+        self.history.append(transition)
         
         # Update state
-        self.previous_phase = self.current_phase
+        old_phase = self.current_phase
         self.current_phase = to_phase
         
-        # Clear error if moving out of error state
+        # Reset error count on successful non-error transition
         if to_phase != Phase.ERROR:
-            self.error_message = None
+            self.error_count = 0
         
-        # Notify callbacks
-        self._notify_callbacks("transition", {
-            "from": self.previous_phase.value,
-            "to": to_phase.value,
-            "reason": reason
-        })
+        # Enter callbacks
+        for callback in self.callbacks["on_enter"]:
+            try:
+                callback(old_phase, to_phase, data)
+            except:
+                pass
         
         return True
     
-    def record_action(
-        self,
-        action_type: str,
-        description: str,
-        result: ActionResult,
-        output: str = "",
-        duration_ms: int = 0
-    ) -> ActionRecord:
-        """Record an action"""
-        action = ActionRecord(
-            action_id=f"{self.session_id}_{len(self.actions)}",
-            phase=self.current_phase,
-            action_type=action_type,
-            description=description,
-            result=result,
-            output=output,
-            duration_ms=duration_ms
-        )
+    def handle_error(self, error: str, recoverable: bool = True) -> bool:
+        """
+        Handle error with optional recovery
         
-        self.actions.append(action)
-        
-        self._notify_callbacks("action", {
-            "type": action_type,
-            "result": result.value,
-            "phase": self.current_phase.value
-        })
-        
-        return action
-    
-    def handle_error(self, error_message: str, recoverable: bool = True):
-        """Handle error state"""
-        self.error_message = error_message
-        
-        if recoverable:
-            # Check retry count
-            current_retries = self.phase_retries.get(self.current_phase, 0)
+        Args:
+            error: Error message
+            recoverable: Whether to attempt recovery
             
-            if current_retries < self.MAX_RETRIES:
-                self.phase_retries[self.current_phase] = current_retries + 1
-                self._notify_callbacks("retry", {
-                    "phase": self.current_phase.value,
-                    "attempt": current_retries + 1,
-                    "max_retries": self.MAX_RETRIES
-                })
-            else:
-                self.transition(Phase.ERROR, f"Max retries exceeded: {error_message}")
-        else:
-            self.transition(Phase.ERROR, error_message)
-    
-    async def wait_with_backoff(self, attempt: int):
-        """Wait with exponential backoff"""
-        backoff_ms = min(
-            self.BASE_BACKOFF_MS * (2 ** attempt),
-            self.MAX_BACKOFF_MS
-        )
+        Returns:
+            True if recovered, False otherwise
+        """
+        self.error_count += 1
         
-        self._notify_callbacks("backoff", {
-            "duration_ms": backoff_ms,
-            "attempt": attempt
-        })
+        # Error callbacks
+        for callback in self.callbacks["on_error"]:
+            try:
+                callback(self.current_phase, error, self.error_count)
+            except:
+                pass
         
-        await asyncio.sleep(backoff_ms / 1000)
-    
-    def pause(self):
-        """Pause state machine"""
-        self.paused = True
-        self._notify_callbacks("paused", {})
-    
-    def resume(self):
-        """Resume state machine"""
-        self.paused = False
-        self._notify_callbacks("resumed", {})
-    
-    def reset(self):
-        """Reset to initial state"""
-        self.current_phase = Phase.INIT
-        self.previous_phase = None
-        self.phase_retries = {}
-        self.error_message = None
-        self.paused = False
-        self._notify_callbacks("reset", {})
-    
-    def get_phase_actions(self, phase: Phase) -> List[ActionRecord]:
-        """Get actions for a specific phase"""
-        return [a for a in self.actions if a.phase == phase]
-    
-    def get_phase_stats(self) -> Dict[str, Dict]:
-        """Get statistics per phase"""
-        stats = {}
+        if not recoverable or self.error_count >= self.max_retries:
+            self.transition(Phase.ERROR, "error", {"error": error, "count": self.error_count})
+            return False
         
-        for phase in Phase:
-            phase_actions = self.get_phase_actions(phase)
-            
-            if phase_actions:
-                success = len([a for a in phase_actions if a.result == ActionResult.SUCCESS])
-                failure = len([a for a in phase_actions if a.result == ActionResult.FAILURE])
-                total_duration = sum(a.duration_ms for a in phase_actions)
-                
-                stats[phase.value] = {
-                    "actions": len(phase_actions),
-                    "success": success,
-                    "failure": failure,
-                    "success_rate": success / len(phase_actions) if phase_actions else 0,
-                    "total_duration_ms": total_duration,
-                    "avg_duration_ms": total_duration / len(phase_actions) if phase_actions else 0
-                }
-        
-        return stats
+        # Stay in current phase for retry
+        return True
     
-    def get_timeline(self) -> List[Dict]:
-        """Get timeline of all transitions and actions"""
-        timeline = []
+    def recover(self, to_phase: Phase = Phase.RECONNAISSANCE) -> bool:
+        """Recover from error state"""
+        if self.current_phase != Phase.ERROR:
+            return True
         
-        for t in self.transitions:
-            timeline.append({
-                "type": "transition",
-                "time": t.timestamp.isoformat(),
+        if self.can_transition(to_phase):
+            self.error_count = 0
+            return self.transition(to_phase, "recovery")
+        
+        return False
+    
+    def on_enter(self, callback: Callable):
+        """Register on-enter callback"""
+        self.callbacks["on_enter"].append(callback)
+    
+    def on_exit(self, callback: Callable):
+        """Register on-exit callback"""
+        self.callbacks["on_exit"].append(callback)
+    
+    def on_error(self, callback: Callable):
+        """Register on-error callback"""
+        self.callbacks["on_error"].append(callback)
+    
+    def get_valid_transitions(self) -> List[Phase]:
+        """Get list of valid next phases"""
+        return self.TRANSITIONS.get(self.current_phase, [])
+    
+    def get_history(self) -> List[Dict]:
+        """Get transition history as dicts"""
+        return [
+            {
                 "from": t.from_phase.value,
                 "to": t.to_phase.value,
-                "reason": t.reason
-            })
-        
-        for a in self.actions:
-            timeline.append({
-                "type": "action",
-                "time": a.timestamp.isoformat(),
-                "phase": a.phase.value,
-                "action": a.action_type,
-                "result": a.result.value
-            })
-        
-        # Sort by time
-        timeline.sort(key=lambda x: x["time"])
-        return timeline
+                "trigger": t.trigger,
+                "timestamp": t.timestamp.isoformat(),
+                "data": t.data
+            }
+            for t in self.history
+        ]
     
-    def export_state(self) -> Dict:
-        """Export current state"""
+    def reset(self, to_phase: Phase = Phase.PRE_ENGAGEMENT):
+        """Reset state machine"""
+        self.current_phase = to_phase
+        self.history = []
+        self.error_count = 0
+    
+    @property
+    def is_complete(self) -> bool:
+        """Check if workflow is complete"""
+        return self.current_phase == Phase.COMPLETED
+    
+    @property
+    def is_error(self) -> bool:
+        """Check if in error state"""
+        return self.current_phase == Phase.ERROR
+    
+    @property
+    def progress(self) -> float:
+        """Get progress percentage (0-100)"""
+        phases = list(Phase)
+        if self.current_phase == Phase.COMPLETED:
+            return 100.0
+        if self.current_phase == Phase.ERROR:
+            return -1.0
+        
+        try:
+            idx = phases.index(self.current_phase)
+            # Exclude ERROR and COMPLETED from count
+            total = len(phases) - 2
+            return (idx / total) * 100
+        except:
+            return 0.0
+
+
+class WorkflowContext:
+    """Context passed through workflow"""
+    
+    def __init__(self, target: str, scope: List[str] = None):
+        self.target = target
+        self.scope = scope or []
+        self.findings: List[Dict] = []
+        self.artifacts: List[str] = []
+        self.metadata: Dict[str, Any] = {}
+        self.started_at = datetime.now()
+        self.completed_at: Optional[datetime] = None
+    
+    def add_finding(self, finding: Dict):
+        """Add security finding"""
+        finding["timestamp"] = datetime.now().isoformat()
+        self.findings.append(finding)
+    
+    def add_artifact(self, path: str):
+        """Add artifact path"""
+        self.artifacts.append(path)
+    
+    def set_metadata(self, key: str, value: Any):
+        """Set metadata value"""
+        self.metadata[key] = value
+    
+    def complete(self):
+        """Mark workflow as complete"""
+        self.completed_at = datetime.now()
+    
+    @property
+    def duration(self) -> float:
+        """Get duration in seconds"""
+        end = self.completed_at or datetime.now()
+        return (end - self.started_at).total_seconds()
+    
+    def to_dict(self) -> Dict:
+        """Export as dictionary"""
         return {
-            "session_id": self.session_id,
-            "current_phase": self.current_phase.value,
-            "previous_phase": self.previous_phase.value if self.previous_phase else None,
-            "paused": self.paused,
-            "error_message": self.error_message,
-            "transitions_count": len(self.transitions),
-            "actions_count": len(self.actions),
-            "phase_retries": {p.value: c for p, c in self.phase_retries.items()},
-            "stats": self.get_phase_stats()
-        }
-    
-    def save_state(self, filepath: str):
-        """Save state to file"""
-        data = {
-            "session_id": self.session_id,
-            "current_phase": self.current_phase.value,
-            "previous_phase": self.previous_phase.value if self.previous_phase else None,
-            "transitions": [
-                {
-                    "from": t.from_phase.value,
-                    "to": t.to_phase.value,
-                    "reason": t.reason,
-                    "timestamp": t.timestamp.isoformat()
-                }
-                for t in self.transitions
-            ],
-            "actions": [
-                {
-                    "action_id": a.action_id,
-                    "phase": a.phase.value,
-                    "action_type": a.action_type,
-                    "description": a.description,
-                    "result": a.result.value,
-                    "output": a.output[:1000],  # Truncate
-                    "duration_ms": a.duration_ms,
-                    "retry_count": a.retry_count,
-                    "timestamp": a.timestamp.isoformat()
-                }
-                for a in self.actions
-            ],
-            "phase_retries": {p.value: c for p, c in self.phase_retries.items()}
-        }
-        
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
-    
-    def load_state(self, filepath: str):
-        """Load state from file"""
-        with open(filepath) as f:
-            data = json.load(f)
-        
-        self.session_id = data["session_id"]
-        self.current_phase = Phase(data["current_phase"])
-        self.previous_phase = Phase(data["previous_phase"]) if data["previous_phase"] else None
-        
-        self.transitions = [
-            StateTransition(
-                from_phase=Phase(t["from"]),
-                to_phase=Phase(t["to"]),
-                reason=t["reason"],
-                timestamp=datetime.fromisoformat(t["timestamp"])
-            )
-            for t in data["transitions"]
-        ]
-        
-        self.actions = [
-            ActionRecord(
-                action_id=a["action_id"],
-                phase=Phase(a["phase"]),
-                action_type=a["action_type"],
-                description=a["description"],
-                result=ActionResult(a["result"]),
-                output=a["output"],
-                duration_ms=a["duration_ms"],
-                retry_count=a["retry_count"],
-                timestamp=datetime.fromisoformat(a["timestamp"])
-            )
-            for a in data["actions"]
-        ]
-        
-        self.phase_retries = {
-            Phase(k): v for k, v in data.get("phase_retries", {}).items()
+            "target": self.target,
+            "scope": self.scope,
+            "findings": self.findings,
+            "artifacts": self.artifacts,
+            "metadata": self.metadata,
+            "started_at": self.started_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "duration_seconds": self.duration
         }

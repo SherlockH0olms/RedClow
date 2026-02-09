@@ -1,35 +1,36 @@
 """
-RedClaw Core Module
-Central components for the autonomous penetration testing system
+RedClaw Core Components
 """
 
-from .llm_client import RedClawLLM, get_llm_client, Message, LLMResponse
-from .orchestrator import AgentOrchestrator, Phase
-from .state_machine import StateMachine, Phase as SMPhase, ActionResult
-from .memory import MemoryManager, get_memory_manager
-from .rag import RAGSystem, get_rag_system
+from .llm_client import RedClawLLM, Message, LLMResponse, StreamChunk, get_llm_client
+from .orchestrator import ScenarioOrchestrator, ScenarioState, AgentTask, AttackPlan
+from .state_machine import StateMachine, Phase, ActionResult, WorkflowContext
+from .memory import MemoryManager, MemoryEntry, AttackPattern
+from .rag import RAGSystem, RAGDocument, RAGResult
 
 __all__ = [
-    # LLM Client
+    # LLM
     "RedClawLLM",
-    "get_llm_client",
     "Message",
     "LLMResponse",
-    
+    "StreamChunk",
+    "get_llm_client",
     # Orchestrator
-    "AgentOrchestrator",
-    "Phase",
-    
+    "ScenarioOrchestrator",
+    "ScenarioState",
+    "AgentTask",
+    "AttackPlan",
     # State Machine
     "StateMachine",
-    "SMPhase",
+    "Phase",
     "ActionResult",
-    
+    "WorkflowContext",
     # Memory
     "MemoryManager",
-    "get_memory_manager",
-    
+    "MemoryEntry",
+    "AttackPattern",
     # RAG
     "RAGSystem",
-    "get_rag_system"
+    "RAGDocument",
+    "RAGResult",
 ]

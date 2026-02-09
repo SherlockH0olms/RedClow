@@ -1,18 +1,27 @@
 """
-RedClaw Agents Module
-Specialized agents for penetration testing phases
+RedClaw Agents Package
+Specialized penetration testing agents
 """
 
-from .recon_agent import ReconAgent
-from .scanning_agent import ScanningAgent
-from .exploitation_agent import ExploitationAgent
-from .post_exploitation_agent import PostExploitationAgent
-from .reporting_agent import ReportingAgent
+from .base import BaseAgent, AgentCapability, AgentResult, AgentState
+from .recon_agent import ReconAgent, ReconFinding
+from .exploit_agent import ExploitAgent, ExploitChainAgent, ExploitAttempt
+from .postexploit_agent import PostExploitAgent, CollectedData
 
 __all__ = [
+    # Base
+    "BaseAgent",
+    "AgentCapability",
+    "AgentResult",
+    "AgentState",
+    # Recon
     "ReconAgent",
-    "ScanningAgent", 
-    "ExploitationAgent",
-    "PostExploitationAgent",
-    "ReportingAgent"
+    "ReconFinding",
+    # Exploit
+    "ExploitAgent",
+    "ExploitChainAgent",
+    "ExploitAttempt",
+    # Post-Exploit
+    "PostExploitAgent",
+    "CollectedData",
 ]
