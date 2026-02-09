@@ -224,6 +224,52 @@ PLACEHOLDER_SUGGESTIONS = [
     "help                   Show all commands",
 ]
 
+# ==================== Slash Commands (Claude Code Style) ====================
+# Commands that start with '/' for quick actions
+
+SLASH_COMMANDS = {
+    "/clear": {
+        "description": "Clear screen and show banner",
+        "shortcut": "Ctrl+L",
+    },
+    "/config": {
+        "description": "Show or edit configuration",
+        "shortcut": None,
+    },
+    "/export": {
+        "description": "Export session data to file",
+        "shortcut": None,
+    },
+    "/help": {
+        "description": "Show all slash commands",
+        "shortcut": None,
+    },
+    "/model": {
+        "description": "Show or switch LLM model",
+        "shortcut": None,
+    },
+    "/session": {
+        "description": "Manage sessions (save/load/list)",
+        "shortcut": None,
+    },
+    "/status": {
+        "description": "Show current session status",
+        "shortcut": None,
+    },
+    "/theme": {
+        "description": "Switch color theme (dark/light)",
+        "shortcut": None,
+    },
+    "/target": {
+        "description": "Quick set target",
+        "shortcut": None,
+    },
+    "/scan": {
+        "description": "Quick scan current target",
+        "shortcut": None,
+    },
+}
+
 
 # ==================== Custom Completer ====================
 
@@ -557,7 +603,97 @@ class RedClawApp:
         cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
         
-        # Built-in commands
+        # ==================== Slash Commands (/) ====================
+        if cmd.startswith("/"):
+            slash_cmd = cmd
+            slash_args = args
+            
+            if slash_cmd == "/clear":
+                self.console.clear()
+                self.show_banner()
+                return True
+            
+            elif slash_cmd == "/config":
+                self._show_config()
+                return True
+            
+            elif slash_cmd == "/status":
+                self.show_status()
+                return True
+            
+            elif slash_cmd == "/help":
+                # Show slash command help
+                self.console.print("\n[bold cyan]Slash Commands[/bold cyan]")
+                self.console.print("[dim]Quick actions that start with /[/dim]\n")
+                for scmd, info in sorted(SLASH_COMMANDS.items()):
+                    shortcut = f" [{info['shortcut']}]" if info.get('shortcut') else ""
+                    self.console.print(f"  [green]{scmd:12}[/green] {info['description']}{shortcut}")
+                self.console.print("\n[dim]Tip: Use ! prefix for bash commands (e.g. !nmap -sV target)[/dim]")
+                return True
+            
+            elif slash_cmd == "/session":
+                await self._handle_session(slash_args)
+                return True
+            
+            elif slash_cmd == "/export":
+                await self._export_session(slash_args or "session_export.json")
+                return True
+            
+            elif slash_cmd == "/model":
+                self.console.print(f"[cyan]Current Model:[/cyan] {os.environ.get('LLM_MODEL', 'default')}")
+                self.console.print(f"[cyan]API URL:[/cyan] {os.environ.get('LLM_API_URL', 'Not set')}")
+                return True
+            
+            elif slash_cmd == "/theme":
+                # Toggle theme indication (visual only for now)
+                self.console.print("[yellow]Theme switching coming soon![/yellow]")
+                return True
+            
+            elif slash_cmd == "/target":
+                if slash_args:
+                    self.target = slash_args
+                    self.phase = Phase.RECONNAISSANCE
+                    self.console.print(f"[green]✓[/green] Target: [bright_yellow]{self.target}[/bright_yellow]")
+                else:
+                    self.console.print(f"[cyan]Current target:[/cyan] {self.target or '[dim]Not set[/dim]'}")
+                return True
+            
+            elif slash_cmd == "/scan":
+                if self.target:
+                    await self._run_scan()
+                else:
+                    self.console.print("[yellow]No target. Use /target <host> first.[/yellow]")
+                return True
+            
+            else:
+                self.console.print(f"[yellow]Unknown slash command: {slash_cmd}. Type /help for list.[/yellow]")
+                return True
+        
+        # ==================== Bash Mode (!) ====================
+        if command.startswith("!"):
+            bash_cmd = command[1:].strip()
+            if bash_cmd:
+                self.console.print(f"[dim]$ {bash_cmd}[/dim]")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        bash_cmd, 
+                        shell=True, 
+                        capture_output=True, 
+                        text=True,
+                        timeout=60
+                    )
+                    if result.stdout:
+                        self.console.print(result.stdout)
+                    if result.stderr:
+                        self.console.print(f"[red]{result.stderr}[/red]")
+                except subprocess.TimeoutExpired:
+                    self.console.print("[red]Command timed out (60s limit)[/red]")
+                except Exception as e:
+                    self.console.print(f"[red]Error: {e}[/red]")
+            return True
+        
+        # ==================== Built-in commands ====================
         if cmd in ("exit", "quit", "q"):
             return False
         
