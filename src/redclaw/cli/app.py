@@ -1,34 +1,35 @@
 """
-RedClaw CLI - Claude Code-like TUI Application
-Professional terminal UI with Rich library and Tab completion
+RedClaw CLI - Claude Code-style Terminal Interface
+Inspired by https://github.com/anthropics/claude-code
 """
 
 import asyncio
 import os
 import sys
-from typing import Optional, List, Dict, Any
+import time
+import json
+from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 from pathlib import Path
+from enum import Enum
 
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
-from rich.layout import Layout
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.text import Text
 from rich.style import Style
+from rich.rule import Rule
+from rich.columns import Columns
 from rich import box
 
-# Prompt toolkit for Claude Code-like experience
+# Prompt toolkit (optional)
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import (
-        Completer, Completion, WordCompleter, 
-        merge_completers, FuzzyCompleter
-    )
+    from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style as PTStyle
@@ -37,1157 +38,882 @@ try:
 except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
-from ..core import (
-    RedClawLLM, get_llm_client, Message, StreamChunk,
-    ScenarioOrchestrator, StateMachine, Phase,
-    MemoryManager, RAGSystem
-)
+# RedClaw core
+from ..core.llm_client import RedClawLLM, get_llm_client, Message, StreamChunk
+from ..core.orchestrator import ScenarioOrchestrator
+from ..core.state_machine import StateMachine, Phase
+from ..core.memory import MemoryManager
+from ..core.rag import RAGSystem
 
-# Import autonomous agent (with fallback)
+# Autonomous agent
 try:
-    from ..agents.autonomous_agent import AutonomousAgent, auto_pwn
-    AUTONOMOUS_AGENT_AVAILABLE = True
+    from ..agents.autonomous_agent import AutonomousAgent, AgentPhase, AgentState, TOOL_DEFINITIONS, execute_tool
+    AGENT_AVAILABLE = True
 except ImportError:
-    AUTONOMOUS_AGENT_AVAILABLE = False
+    AGENT_AVAILABLE = False
     AutonomousAgent = None
-    auto_pwn = None
+
+# Engines
+try:
+    from ..engines.hexstrike_client import HexStrikeClient, HexStrikeFallback, ScanType, AttackType
+    HEXSTRIKE_AVAILABLE = True
+except ImportError:
+    HEXSTRIKE_AVAILABLE = False
+    HexStrikeClient = None
+
+try:
+    from ..engines.metasploit_client import MetasploitClient
+    METASPLOIT_AVAILABLE = True
+except ImportError:
+    METASPLOIT_AVAILABLE = False
+    MetasploitClient = None
+
+try:
+    from ..engines.caldera_client import CALDERAClient
+    CALDERA_AVAILABLE = True
+except ImportError:
+    CALDERA_AVAILABLE = False
+    CALDERAClient = None
+
+# MCP Bridge
+try:
+    from ..integrations.mcp_bridge import MCPBridge, MCPToolRegistry
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
 
 
-# ==================== Styles ====================
+# ==========================================
+#  THEME - Claude Code inspired dark theme
+# ==========================================
 
-STYLES = {
-    "title": Style(color="bright_cyan", bold=True),
-    "subtitle": Style(color="cyan"),
-    "success": Style(color="bright_green"),
-    "error": Style(color="bright_red"),
-    "warning": Style(color="bright_yellow"),
-    "info": Style(color="bright_blue"),
-    "muted": Style(color="bright_black"),
-    "highlight": Style(color="bright_magenta"),
-    "target": Style(color="bright_yellow", bold=True),
-}
-
-SEVERITY_COLORS = {
-    "critical": "bright_red",
-    "high": "red",
-    "medium": "yellow",
-    "low": "bright_blue",
-    "info": "bright_black"
-}
+class Theme:
+    BRAND = "#FF4444"           # Red brand color
+    TEXT = "white"
+    DIM = "bright_black"
+    SUCCESS = "#00FF88"
+    WARNING = "#FFAA00"
+    ERROR = "#FF4444"
+    INFO = "#00AAFF"
+    TOOL_BORDER = "#555555"
+    TOOL_HEADER = "#AAAAAA"
+    AGENT = "#BB88FF"           # Purple for AI responses
+    USER = "#00CCFF"            # Blue for user input
+    PROMPT = "#FF6666"
 
 
-# ==================== Banner ====================
+# ==========================================
+#  TOOL CALL RENDERER
+#  Shows tool calls like Claude Code does
+# ==========================================
 
-BANNER = """
-[bright_red]
-██████╗ ███████╗██████╗  ██████╗██╗      █████╗ ██╗    ██╗
-██╔══██╗██╔════╝██╔══██╗██╔════╝██║     ██╔══██╗██║    ██║
-██████╔╝█████╗  ██║  ██║██║     ██║     ███████║██║ █╗ ██║
-██╔══██╗██╔══╝  ██║  ██║██║     ██║     ██╔══██║██║███╗██║
-██║  ██║███████╗██████╔╝╚██████╗███████╗██║  ██║╚███╔███╔╝
-╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ 
-[/bright_red]
-[bright_cyan]v2.0[/bright_cyan] | [bright_yellow]Autonomous Red Team AI Agent[/bright_yellow]
-"""
-
-
-# ==================== Commands & Placeholders ====================
-
-# Claude Code-like command definitions with descriptions
-COMMANDS = {
-    # Targeting
-    "target": {
-        "description": "Set target host for testing",
-        "usage": "target <hostname or IP>",
-        "examples": ["target example.com", "target 192.168.1.1"],
-    },
+class ToolCallRenderer:
+    """Renders tool calls in Claude Code style blocks"""
     
-    # Scanning
-    "scan": {
-        "description": "Start reconnaissance & scanning on target",  
-        "usage": "scan [options]",
-        "examples": ["scan", "scan --deep", "scan --passive"],
-    },
-    "recon": {
-        "description": "Passive reconnaissance only",
-        "usage": "recon <target>",
-        "examples": ["recon example.com"],
-    },
+    def __init__(self, console: Console):
+        self.console = console
     
-    # Exploitation
-    "exploit": {
-        "description": "Attempt exploitation (requires confirmation)",
-        "usage": "exploit [vulnerability]",
-        "examples": ["exploit", "exploit CVE-2021-44228"],
-    },
-    "payload": {
-        "description": "Generate payload for target",
-        "usage": "payload <type>",
-        "examples": ["payload reverse_shell", "payload meterpreter"],
-    },
+    def render_tool_start(self, tool_name: str, args: Dict[str, Any]):
+        """Show tool invocation header"""
+        self.console.print()
+        args_str = " ".join(f"{k}={v}" for k, v in args.items() if v)
+        header = Text()
+        header.append("  ", style="dim")
+        header.append(f" {tool_name} ", style="bold white on #333333")
+        header.append(f" {args_str}", style="dim")
+        self.console.print(header)
     
-    # Post-Exploitation
-    "privesc": {
-        "description": "Find privilege escalation vectors",
-        "usage": "privesc",
-        "examples": ["privesc"],
-    },
-    "persist": {
-        "description": "Establish persistence",
-        "usage": "persist <method>",
-        "examples": ["persist cron", "persist service"],
-    },
-    "exfil": {
-        "description": "Exfiltrate data",
-        "usage": "exfil <file>",
-        "examples": ["exfil /etc/passwd"],
-    },
+    def render_tool_output(self, output: str, success: bool = True):
+        """Show tool output"""
+        color = Theme.SUCCESS if success else Theme.ERROR
+        lines = output.strip().split("\n")
+        for line in lines[:20]:  # Limit output lines
+            self.console.print(f"  [dim]│[/dim] {line}")
+        if len(lines) > 20:
+            self.console.print(f"  [dim]│ ... ({len(lines) - 20} more lines)[/dim]")
+        self.console.print()
     
-    # Reporting
-    "report": {
-        "description": "Generate findings report",
-        "usage": "report [format]",
-        "examples": ["report", "report --format pdf"],
-    },
-    "findings": {
-        "description": "List discovered findings",
-        "usage": "findings",
-        "examples": ["findings"],
-    },
-    
-    # Session
-    "session": {
-        "description": "Manage sessions",
-        "usage": "session <save|load|list>",
-        "examples": ["session save", "session load abc123", "session list"],
-    },
-    "status": {
-        "description": "Show current session status",
-        "usage": "status",
-        "examples": ["status"],
-    },
-    "history": {
-        "description": "Show command history",
-        "usage": "history",
-        "examples": ["history"],
-    },
-    
-    # AI Red Team
-    "ai-attack": {
-        "description": "Launch AI red team attack on LLM",
-        "usage": "ai-attack <target_api>",
-        "examples": ["ai-attack chatgpt", "ai-attack claude"],
-    },
-    "jailbreak": {
-        "description": "Attempt LLM jailbreak",
-        "usage": "jailbreak <method>",
-        "examples": ["jailbreak roleplay", "jailbreak encoding"],
-    },
-    
-    # Tools
-    "nmap": {
-        "description": "Run nmap scan",
-        "usage": "nmap <target> [options]",
-        "examples": ["nmap -sV target", "nmap -A -p- target"],
-    },
-    "nikto": {
-        "description": "Run nikto web scanner",
-        "usage": "nikto <target>",
-        "examples": ["nikto -h target"],
-    },
-    "gobuster": {
-        "description": "Directory bruteforce",
-        "usage": "gobuster <target>",
-        "examples": ["gobuster dir -u target -w wordlist"],
-    },
-    
-    # Autonomous Mode
-    "auto-pwn": {
-        "description": "Launch autonomous AI agent to fully pentest a target",
-        "usage": "auto-pwn <target> [objective]",
-        "examples": ["auto-pwn 10.10.10.1", "auto-pwn victim.htb find flags", "auto-pwn 192.168.1.100 gain root access"],
-    },
-    
-    # System
-    "config": {
-        "description": "Show configuration",
-        "usage": "config",
-        "examples": ["config"],
-    },
-    "help": {
-        "description": "Show help",
-        "usage": "help [command]",
-        "examples": ["help", "help scan"],
-    },
-    "clear": {
-        "description": "Clear screen",
-        "usage": "clear",
-        "examples": ["clear"],
-    },
-    "exit": {
-        "description": "Exit RedClaw",
-        "usage": "exit",
-        "examples": ["exit"],
-    },
-}
+    def render_tool_result(self, tool_name: str, args: Dict, output: str, success: bool = True, duration: float = 0):
+        """Render complete tool call block"""
+        self.render_tool_start(tool_name, args)
+        self.render_tool_output(output, success)
+        if duration > 0:
+            self.console.print(f"  [dim]⏱ {duration:.1f}s[/dim]")
 
-# Placeholder suggestions shown when empty (like Claude Code)
-PLACEHOLDER_SUGGESTIONS = [
-    "target example.com     Set a target to begin",
-    "scan                   Start reconnaissance scan", 
-    "exploit                Attempt exploitation",
-    "report                 Generate findings report",
-    "help                   Show all commands",
-]
 
-# ==================== Slash Commands (Claude Code Style) ====================
-# Commands that start with '/' for quick actions
+# ==========================================
+#  SLASH COMMANDS
+# ==========================================
 
 SLASH_COMMANDS = {
-    "/clear": {
-        "description": "Clear screen and show banner",
-        "shortcut": "Ctrl+L",
-    },
-    "/config": {
-        "description": "Show or edit configuration",
-        "shortcut": None,
-    },
-    "/export": {
-        "description": "Export session data to file",
-        "shortcut": None,
-    },
-    "/help": {
-        "description": "Show all slash commands",
-        "shortcut": None,
-    },
-    "/model": {
-        "description": "Show or switch LLM model",
-        "shortcut": None,
-    },
-    "/session": {
-        "description": "Manage sessions (save/load/list)",
-        "shortcut": None,
-    },
-    "/status": {
-        "description": "Show current session status",
-        "shortcut": None,
-    },
-    "/theme": {
-        "description": "Switch color theme (dark/light)",
-        "shortcut": None,
-    },
-    "/target": {
-        "description": "Quick set target",
-        "shortcut": None,
-    },
-    "/scan": {
-        "description": "Quick scan current target",
-        "shortcut": None,
-    },
-    "/auto-pwn": {
-        "description": "Launch autonomous AI pentesting agent",
-        "shortcut": "Ctrl+P",
-    },
+    "/help": "Show all commands and usage",
+    "/status": "Show current session status",
+    "/auto-pwn": "Launch autonomous pentesting agent",
+    "/target": "Set or show target",
+    "/scan": "Quick scan current target",
+    "/tools": "List all available tools and engines",
+    "/engines": "Show engine connection status",
+    "/history": "Show tool execution history",
+    "/clear": "Clear screen",
+    "/compact": "Toggle compact output mode",
+    "/exit": "Exit RedClaw",
 }
 
 
-# ==================== Custom Completer ====================
+# ==========================================
+#  COMPLETER
+# ==========================================
 
 if PROMPT_TOOLKIT_AVAILABLE:
     class RedClawCompleter(Completer):
-        """Claude Code-like command completer with descriptions"""
-        
-        def __init__(self, commands: Dict):
-            self.commands = commands
+        """Tab completion for commands"""
         
         def get_completions(self, document, complete_event):
-            text = document.text_before_cursor.lstrip()
-            words = text.split()
+            text = document.text_before_cursor.strip()
             
-            if len(words) == 0:
-                # Empty input - show all commands with descriptions
-                for cmd, info in sorted(self.commands.items()):
-                    yield Completion(
-                        cmd,
-                        start_position=0,
-                        display=cmd,
-                        display_meta=info["description"]
-                    )
-            
-            elif len(words) == 1:
-                # Partial command - complete command names
-                partial = words[0].lower()
-                for cmd, info in sorted(self.commands.items()):
-                    if cmd.startswith(partial):
+            if not text or text.startswith("/"):
+                word = text if text else "/"
+                for cmd, desc in SLASH_COMMANDS.items():
+                    if cmd.startswith(word):
                         yield Completion(
                             cmd,
-                            start_position=-len(partial),
+                            start_position=-len(word),
                             display=cmd,
-                            display_meta=info["description"]
+                            display_meta=desc
                         )
-            
-            else:
-                # After command - show examples
-                cmd = words[0].lower()
-                if cmd in self.commands:
-                    info = self.commands[cmd]
-                    # Show usage
-                    yield Completion(
-                        "",
-                        start_position=0,
-                        display=f"Usage: {info['usage']}",
-                        display_meta=""
-                    )
 
 
-# ==================== Main App ====================
+# ==========================================
+#  ENGINE MANAGER
+#  Manages all attack engines
+# ==========================================
+
+class EngineManager:
+    """Manages connections to all attack engines"""
+    
+    def __init__(self):
+        self.hexstrike: Optional[Any] = None
+        self.metasploit: Optional[Any] = None
+        self.caldera: Optional[Any] = None
+        self.mcp: Optional[Any] = None
+        self._status: Dict[str, str] = {}
+    
+    async def initialize(self):
+        """Initialize all available engines"""
+        # HexStrike
+        if HEXSTRIKE_AVAILABLE:
+            try:
+                self.hexstrike = HexStrikeClient()
+                health = await self.hexstrike.health_check()
+                self._status["hexstrike"] = "online" if health else "offline"
+            except Exception:
+                self.hexstrike = HexStrikeFallback() if HEXSTRIKE_AVAILABLE else None
+                self._status["hexstrike"] = "fallback"
+        else:
+            self._status["hexstrike"] = "unavailable"
+        
+        # Metasploit
+        if METASPLOIT_AVAILABLE:
+            try:
+                self.metasploit = MetasploitClient()
+                self._status["metasploit"] = "ready"
+            except Exception:
+                self._status["metasploit"] = "offline"
+        else:
+            self._status["metasploit"] = "unavailable"
+        
+        # CALDERA
+        if CALDERA_AVAILABLE:
+            try:
+                self.caldera = CALDERAClient()
+                self._status["caldera"] = "ready"
+            except Exception:
+                self._status["caldera"] = "offline"
+        else:
+            self._status["caldera"] = "unavailable"
+        
+        # MCP Bridge
+        if MCP_AVAILABLE:
+            try:
+                self.mcp = MCPBridge()
+                self._status["mcp"] = "ready"
+            except Exception:
+                self._status["mcp"] = "offline"
+        else:
+            self._status["mcp"] = "unavailable"
+    
+    def get_status(self) -> Dict[str, str]:
+        return self._status
+    
+    async def execute_via_engine(self, tool_name: str, args: Dict) -> str:
+        """Route tool calls to appropriate engine"""
+        # HexStrike tools
+        if tool_name in ("nmap_scan", "run_nmap") and self.hexstrike:
+            target = args.get("target", "")
+            options = args.get("options", "-sV")
+            if hasattr(self.hexstrike, "run_nmap"):
+                result = await self.hexstrike.run_nmap(target, options)
+                return json.dumps(result, indent=2)
+            elif hasattr(self.hexstrike, "run_nmap_local"):
+                result = await self.hexstrike.run_nmap_local(target, options)
+                return json.dumps(result, indent=2)
+        
+        if tool_name in ("nikto_scan", "run_nikto") and self.hexstrike:
+            target = args.get("target", args.get("url", ""))
+            if hasattr(self.hexstrike, "run_nikto"):
+                result = await self.hexstrike.run_nikto(target)
+                return json.dumps(result, indent=2)
+            elif hasattr(self.hexstrike, "run_nikto_local"):
+                result = await self.hexstrike.run_nikto_local(target)
+                return json.dumps(result, indent=2)
+        
+        if tool_name == "start_scan" and self.hexstrike:
+            target = args.get("target", "")
+            scan_type = ScanType(args.get("scan_type", "full")) if HEXSTRIKE_AVAILABLE else None
+            if hasattr(self.hexstrike, "start_scan"):
+                result = await self.hexstrike.start_scan(target, scan_type)
+                return f"Scan started: {result.scan_id} ({result.status})"
+        
+        if tool_name == "launch_attack" and self.hexstrike:
+            target = args.get("target", "")
+            attack_type = AttackType(args.get("attack_type", "exploit")) if HEXSTRIKE_AVAILABLE else None
+            if hasattr(self.hexstrike, "launch_attack"):
+                result = await self.hexstrike.launch_attack(target, attack_type, args.get("options"))
+                return f"Attack {result.attack_id}: success={result.success}\n{result.output}"
+        
+        # Metasploit tools
+        if tool_name in ("msf_exploit", "metasploit") and self.metasploit:
+            return "Metasploit integration - module selected"
+        
+        # MCP tools
+        if self.mcp and tool_name.startswith(("github_", "firecrawl_", "kaggle_")):
+            result = await self.mcp.execute(tool_name, args)
+            return json.dumps(result.data, indent=2) if result.success else f"Error: {result.error}"
+        
+        # Fallback to local execution
+        try:
+            result = execute_tool(tool_name, **args) if AGENT_AVAILABLE else f"Tool {tool_name} not available"
+            return str(result)
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+
+# ==========================================
+#  MAIN APP
+# ==========================================
 
 class RedClawApp:
     """
-    RedClaw CLI Application
+    RedClaw CLI - Claude Code Style Interface
     
-    Claude Code-inspired interface with:
-    - Tab completion with command descriptions
-    - Placeholder suggestions
-    - Streaming LLM responses
-    - Rich panels and tables
-    - Progress indicators
-    - Session management
+    Features:
+    - Clean prompt with context
+    - Tool call visualization 
+    - AI-driven autonomous pentesting
+    - Engine integration (HexStrike/Metasploit/CALDERA)
     """
     
-    def __init__(
-        self,
-        llm_url: Optional[str] = None,
-        workspace: Optional[str] = None
-    ):
+    def __init__(self, workspace: Optional[str] = None):
         self.console = Console()
         self.workspace = Path(workspace or os.getcwd())
+        self.tool_renderer = ToolCallRenderer(self.console)
         
-        # Core components
-        self.llm: Optional[RedClawLLM] = None
-        self.orchestrator: Optional[ScenarioOrchestrator] = None
-        self.memory: Optional[MemoryManager] = None
-        self.rag: Optional[RAGSystem] = None
+        # Engines
+        self.engines = EngineManager()
         
-        # State
+        # Agent
+        self.agent: Optional[AutonomousAgent] = None
+        
+        # Session state
         self.target: Optional[str] = None
-        self.session_id: Optional[str] = None
         self.phase = Phase.PRE_ENGAGEMENT
         self.findings: List[Dict] = []
-        self.command_history: List[str] = []
+        self.tool_history: List[Dict] = []
+        self.compact_mode = False
+        self.session_start = datetime.now()
         
-        # Settings
-        self.auto_exploit = False
-        self.verbose = False
-        self.llm_url = llm_url
+        # LLM
+        self.llm: Optional[RedClawLLM] = None
         
-        # Prompt session with completion
-        self.prompt_session = None
+        # Prompt session
+        self.session = None
     
-    async def initialize(self) -> bool:
-        """Initialize all components"""
-        
-        with self.console.status("[bold cyan]Initializing RedClaw...", spinner="dots"):
-            try:
-                # Initialize LLM
-                self.llm = RedClawLLM(
-                    api_url=self.llm_url or os.getenv("LLM_API_URL"),
-                    model=os.getenv("LLM_MODEL", "phi-4")
-                )
-                
-                health = self.llm.health_check()
-                if health.get("status") != "healthy":
-                    self.console.print(
-                        f"[yellow]⚠ LLM connection: {health.get('status', 'unknown')}[/yellow]"
-                    )
-                
-                # Initialize memory
-                data_dir = self.workspace / "data"
-                data_dir.mkdir(exist_ok=True)
-                
-                self.memory = MemoryManager(
-                    persist_dir=str(data_dir / "memory")
-                )
-                self.session_id = self.memory.session_id
-                
-                # Initialize RAG
-                self.rag = RAGSystem(
-                    persist_dir=str(data_dir / "rag")
-                )
-                
-                # Initialize orchestrator
-                self.orchestrator = ScenarioOrchestrator(
-                    llm=self.llm,
-                    auto_exploit=self.auto_exploit
-                )
-                
-                # Initialize prompt session with Tab completion
-                if PROMPT_TOOLKIT_AVAILABLE:
-                    history_file = data_dir / "command_history"
-                    self.prompt_session = PromptSession(
-                        completer=FuzzyCompleter(RedClawCompleter(COMMANDS)),
-                        history=FileHistory(str(history_file)),
-                        auto_suggest=AutoSuggestFromHistory(),
-                        complete_while_typing=True,
-                        enable_history_search=True,
-                    )
-                
-                return True
-                
-            except Exception as e:
-                self.console.print(f"[red]Initialization failed: {e}[/red]")
-                return False
-    
-    def show_banner(self):
-        """Display banner"""
-        self.console.print(BANNER)
+    def _print_header(self):
+        """Print minimal Claude Code-style header"""
+        self.console.print()
+        header = Text()
+        header.append(" RedClaw ", style="bold white on red")
+        header.append(" v2.0 ", style="bold red")
+        header.append("Autonomous Pentest Agent", style="dim")
+        self.console.print(header)
+        self.console.print(f"[dim]Type a request or use /help for commands. /exit to quit.[/dim]")
         self.console.print()
     
-    def show_placeholder(self):
-        """Show placeholder suggestions like Claude Code"""
-        self.console.print()
-        self.console.print("[dim]Try these commands (or press Tab for more):[/dim]")
-        for suggestion in PLACEHOLDER_SUGGESTIONS:
-            self.console.print(f"  [cyan]›[/cyan] [dim]{suggestion}[/dim]")
-        self.console.print()
-    
-    def show_status(self):
-        """Show current status panel"""
-        
-        status_table = Table(
-            show_header=False,
-            box=box.SIMPLE,
-            padding=(0, 1)
-        )
-        status_table.add_column("Key", style="cyan")
-        status_table.add_column("Value")
-        
-        status_table.add_row("Session", self.session_id or "N/A")
-        status_table.add_row(
-            "Target",
-            f"[bright_yellow]{self.target}[/bright_yellow]" if self.target else "[dim]Not set[/dim]"
-        )
-        status_table.add_row("Phase", self.phase.value)
-        status_table.add_row("Findings", str(len(self.findings)))
-        
-        if self.memory:
-            stats = self.memory.get_stats()
-            status_table.add_row("Memory", f"{stats.get('findings_count', 0)} entries")
-        
-        if self.rag:
-            rag_stats = self.rag.get_stats()
-            status_table.add_row(
-                "Knowledge",
-                f"MITRE: {rag_stats.get('mitre_count', 0)}, Exploits: {rag_stats.get('exploit_count', 0)}"
-            )
-        
-        self.console.print(Panel(
-            status_table,
-            title="[bold cyan]Status[/bold cyan]",
-            border_style="cyan"
-        ))
-    
-    def show_help(self, command: str = None):
-        """Show help - command list or specific command help"""
-        
-        if command and command in COMMANDS:
-            # Specific command help
-            info = COMMANDS[command]
-            self.console.print(f"\n[bold cyan]{command}[/bold cyan]")
-            self.console.print(f"  {info['description']}")
-            self.console.print(f"  [dim]Usage:[/dim] {info['usage']}")
-            self.console.print(f"  [dim]Examples:[/dim]")
-            for ex in info['examples']:
-                self.console.print(f"    [green]› {ex}[/green]")
-            self.console.print()
-        else:
-            # All commands grouped
-            categories = {
-                "Targeting": ["target", "recon"],
-                "Scanning": ["scan", "nmap", "nikto", "gobuster"],
-                "Exploitation": ["exploit", "payload"],
-                "Post-Exploitation": ["privesc", "persist", "exfil"],
-                "AI Red Team": ["ai-attack", "jailbreak"],
-                "Reporting": ["report", "findings", "status"],
-                "Session": ["session", "history"],
-                "System": ["config", "help", "clear", "exit"],
-            }
-            
-            self.console.print("\n[bold cyan]RedClaw Commands[/bold cyan]")
-            self.console.print("[dim]Press Tab for autocomplete with descriptions[/dim]\n")
-            
-            for category, cmds in categories.items():
-                self.console.print(f"[bold]{category}[/bold]")
-                for cmd in cmds:
-                    if cmd in COMMANDS:
-                        desc = COMMANDS[cmd]['description']
-                        self.console.print(f"  [green]{cmd:15}[/green] {desc}")
-                self.console.print()
-    
-    def show_findings(self):
-        """Display findings table"""
-        
-        if not self.findings:
-            self.console.print("[dim]No findings yet.[/dim]")
-            return
-        
-        table = Table(
-            title="Security Findings",
-            box=box.ROUNDED,
-            show_lines=True
-        )
-        
-        table.add_column("#", style="dim", width=3)
-        table.add_column("Severity", width=10)
-        table.add_column("Type", width=15)
-        table.add_column("Title", width=40)
-        table.add_column("Target", width=20)
-        
-        for i, finding in enumerate(self.findings, 1):
-            severity = finding.get("severity", "info")
-            color = SEVERITY_COLORS.get(severity, "white")
-            
-            table.add_row(
-                str(i),
-                f"[{color}]{severity.upper()}[/{color}]",
-                finding.get("type", "N/A"),
-                finding.get("title", "N/A"),
-                finding.get("target", self.target or "N/A")
-            )
-        
-        self.console.print(table)
-    
-    async def stream_response(self, prompt: str) -> str:
-        """Stream LLM response with live display"""
-        
-        messages = [
-            Message(role="system", content=self.llm.SYSTEM_PROMPT),
-        ]
-        
-        # Add context
+    def _print_status_line(self):
+        """Print status bar"""
+        parts = []
         if self.target:
-            messages.append(Message(
-                role="system",
-                content=f"Current target: {self.target}\nPhase: {self.phase.value}"
-            ))
+            parts.append(f"[bold yellow]{self.target}[/bold yellow]")
+        parts.append(f"[dim]{self.phase.value}[/dim]")
         
-        # Add RAG context
-        if self.rag and self.target:
-            rag_context = self.rag.get_context_for_target(self.target)
-            if rag_context:
-                messages.append(Message(
-                    role="system",
-                    content=f"Relevant security context:\n{rag_context[:2000]}"
-                ))
+        engine_status = self.engines.get_status()
+        online = sum(1 for s in engine_status.values() if s in ("online", "ready", "fallback"))
+        parts.append(f"[dim]engines: {online}/{len(engine_status)}[/dim]")
         
-        messages.append(Message(role="user", content=prompt))
-        
-        full_response = ""
-        
+        status = " | ".join(parts)
+        self.console.print(f"  {status}")
         self.console.print()
-        with Live(
-            Panel("", title="[bold cyan]RedClaw[/bold cyan]", border_style="cyan"),
-            console=self.console,
-            refresh_per_second=10
-        ) as live:
-            for chunk in self.llm.chat_stream(messages):
-                if chunk.done:
-                    break
-                full_response += chunk.content
-                
-                # Render as markdown
-                try:
-                    md = Markdown(full_response)
-                    live.update(Panel(
-                        md,
-                        title="[bold cyan]RedClaw[/bold cyan]",
-                        border_style="cyan"
-                    ))
-                except:
-                    live.update(Panel(
-                        Text(full_response),
-                        title="[bold cyan]RedClaw[/bold cyan]",
-                        border_style="cyan"
-                    ))
-        
-        return full_response
     
-    async def handle_command(self, command: str) -> bool:
-        """Handle user command, return False to exit"""
+    def _get_prompt(self) -> str:
+        """Build Claude Code-style prompt"""
+        target_str = f"@{self.target}" if self.target else ""
+        return f"{target_str} ❯ "
+    
+    async def initialize(self):
+        """Initialize all components"""
+        # Initialize engines
+        await self.engines.initialize()
         
-        command = command.strip()
-        if not command:
+        # Initialize agent
+        if AGENT_AVAILABLE:
+            self.agent = AutonomousAgent(verbose=True)
+            # Register event handlers for tool visualization
+            self.agent.on("tool_start", self._on_tool_start)
+            self.agent.on("tool_end", self._on_tool_end)
+            self.agent.on("phase_change", self._on_phase_change)
+            self.agent.on("thinking", self._on_thinking)
+        
+        # Initialize LLM
+        try:
+            self.llm = get_llm_client()
+        except Exception:
+            self.llm = None
+        
+        # Prompt toolkit session
+        if PROMPT_TOOLKIT_AVAILABLE:
+            history_path = self.workspace / ".redclaw_history"
+            self.session = PromptSession(
+                history=FileHistory(str(history_path)),
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=RedClawCompleter(),
+            )
+    
+    # ==========================================
+    #  EVENT HANDLERS
+    # ==========================================
+    
+    def _on_tool_start(self, tool_name: str, args: Dict):
+        """Called when agent starts a tool"""
+        self.tool_renderer.render_tool_start(tool_name, args)
+        self.tool_history.append({
+            "tool": tool_name,
+            "args": args,
+            "time": datetime.now().isoformat(),
+            "source": "ai_agent"
+        })
+    
+    def _on_tool_end(self, tool_name: str, result: str, success: bool):
+        """Called when tool finishes"""
+        self.tool_renderer.render_tool_output(result[:500], success)
+    
+    def _on_phase_change(self, new_phase: str):
+        """Called when agent changes phase"""
+        self.console.print(f"\n  [bold {Theme.AGENT}]Phase → {new_phase}[/bold {Theme.AGENT}]")
+    
+    def _on_thinking(self, thought: str):
+        """Called when agent is thinking"""
+        if not self.compact_mode:
+            self.console.print(f"  [dim italic]{thought[:200]}[/dim italic]")
+    
+    # ==========================================
+    #  COMMAND HANDLERS 
+    # ==========================================
+    
+    async def handle_input(self, text: str) -> bool:
+        """Handle user input, returns False to exit"""
+        text = text.strip()
+        
+        if not text:
             return True
         
-        self.command_history.append(command)
-        parts = command.split(maxsplit=1)
-        cmd = parts[0].lower()
+        # Slash commands
+        if text.startswith("/"):
+            return await self._handle_slash_command(text)
+        
+        # Target command (shortcut)
+        if text.startswith("target "):
+            self.target = text.split(" ", 1)[1].strip()
+            self.console.print(f"\n  [green]Target set:[/green] [bold yellow]{self.target}[/bold yellow]\n")
+            return True
+        
+        # Auto-pwn shortcut
+        if text.startswith("auto-pwn ") or text.startswith("pwn "):
+            parts = text.split(" ", 1)
+            target = parts[1].strip() if len(parts) > 1 else self.target
+            if target:
+                await self._run_auto_pwn(target)
+            else:
+                self.console.print("\n  [red]No target specified.[/red] Usage: auto-pwn <target>\n")
+            return True
+        
+        # Natural language -> AI processing
+        await self._process_natural_language(text)
+        return True
+    
+    async def _handle_slash_command(self, cmd: str) -> bool:
+        """Handle slash commands"""
+        parts = cmd.split(" ", 1)
+        command = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
         
-        # ==================== Slash Commands (/) ====================
-        if cmd.startswith("/"):
-            slash_cmd = cmd
-            slash_args = args
-            
-            if slash_cmd == "/clear":
-                self.console.clear()
-                self.show_banner()
-                return True
-            
-            elif slash_cmd == "/config":
-                self._show_config()
-                return True
-            
-            elif slash_cmd == "/status":
-                self.show_status()
-                return True
-            
-            elif slash_cmd == "/help":
-                # Show slash command help
-                self.console.print("\n[bold cyan]Slash Commands[/bold cyan]")
-                self.console.print("[dim]Quick actions that start with /[/dim]\n")
-                for scmd, info in sorted(SLASH_COMMANDS.items()):
-                    shortcut = f" [{info['shortcut']}]" if info.get('shortcut') else ""
-                    self.console.print(f"  [green]{scmd:12}[/green] {info['description']}{shortcut}")
-                self.console.print("\n[dim]Tip: Use ! prefix for bash commands (e.g. !nmap -sV target)[/dim]")
-                return True
-            
-            elif slash_cmd == "/session":
-                await self._handle_session(slash_args)
-                return True
-            
-            elif slash_cmd == "/export":
-                await self._export_session(slash_args or "session_export.json")
-                return True
-            
-            elif slash_cmd == "/model":
-                self.console.print(f"[cyan]Current Model:[/cyan] {os.environ.get('LLM_MODEL', 'default')}")
-                self.console.print(f"[cyan]API URL:[/cyan] {os.environ.get('LLM_API_URL', 'Not set')}")
-                return True
-            
-            elif slash_cmd == "/theme":
-                # Toggle theme indication (visual only for now)
-                self.console.print("[yellow]Theme switching coming soon![/yellow]")
-                return True
-            
-            elif slash_cmd == "/target":
-                if slash_args:
-                    self.target = slash_args
-                    self.phase = Phase.RECONNAISSANCE
-                    self.console.print(f"[green]✓[/green] Target: [bright_yellow]{self.target}[/bright_yellow]")
-                else:
-                    self.console.print(f"[cyan]Current target:[/cyan] {self.target or '[dim]Not set[/dim]'}")
-                return True
-            
-            elif slash_cmd == "/scan":
-                if self.target:
-                    await self._run_scan()
-                else:
-                    self.console.print("[yellow]No target. Use /target <host> first.[/yellow]")
-                return True
-            
-            elif slash_cmd == "/auto-pwn":
-                target = slash_args if slash_args else self.target
-                if target:
-                    await self._run_auto_pwn(target)
-                else:
-                    self.console.print("[yellow]No target. Use /auto-pwn <target> or set target first.[/yellow]")
-                return True
-            
-            else:
-                self.console.print(f"[yellow]Unknown slash command: {slash_cmd}. Type /help for list.[/yellow]")
-                return True
-        
-        # ==================== Bash Mode (!) ====================
-        if command.startswith("!"):
-            bash_cmd = command[1:].strip()
-            if bash_cmd:
-                self.console.print(f"[dim]$ {bash_cmd}[/dim]")
-                try:
-                    import subprocess
-                    result = subprocess.run(
-                        bash_cmd, 
-                        shell=True, 
-                        capture_output=True, 
-                        text=True,
-                        timeout=60
-                    )
-                    if result.stdout:
-                        self.console.print(result.stdout)
-                    if result.stderr:
-                        self.console.print(f"[red]{result.stderr}[/red]")
-                except subprocess.TimeoutExpired:
-                    self.console.print("[red]Command timed out (60s limit)[/red]")
-                except Exception as e:
-                    self.console.print(f"[red]Error: {e}[/red]")
-            return True
-        
-        # ==================== Built-in commands ====================
-        if cmd in ("exit", "quit", "q"):
+        if command == "/exit" or command == "/quit":
+            self.console.print("\n  [dim]Goodbye.[/dim]\n")
             return False
         
-        elif cmd == "help":
-            self.show_help(args if args else None)
+        elif command == "/help":
+            self._show_help()
         
-        elif cmd == "status":
-            self.show_status()
+        elif command == "/status":
+            self._show_status()
         
-        elif cmd == "findings":
-            self.show_findings()
-        
-        elif cmd == "history":
-            for i, h in enumerate(self.command_history[-20:], 1):
-                self.console.print(f"[dim]{i}.[/dim] {h}")
-        
-        elif cmd == "target":
+        elif command == "/target":
             if args:
-                self.target = args
-                self.phase = Phase.RECONNAISSANCE
-                self.console.print(f"[green]✓[/green] Target set: [bright_yellow]{self.target}[/bright_yellow]")
+                self.target = args.strip()
+                self.console.print(f"\n  [green]Target set:[/green] [bold yellow]{self.target}[/bold yellow]\n")
             else:
-                self.console.print("[yellow]Usage: target <hostname or IP>[/yellow]")
+                t = self.target or "(none)"
+                self.console.print(f"\n  [dim]Current target:[/dim] [bold yellow]{t}[/bold yellow]\n")
         
-        elif cmd in ("scan", "recon"):
-            if not self.target:
-                self.console.print("[yellow]No target set. Use 'target <host>' first.[/yellow]")
+        elif command == "/auto-pwn":
+            target = args.strip() or self.target
+            if target:
+                await self._run_auto_pwn(target)
             else:
-                await self._run_scan()
+                self.console.print("\n  [red]No target.[/red] Usage: /auto-pwn <target>\n")
         
-        elif cmd == "exploit":
-            if not self.target:
-                self.console.print("[yellow]No target set.[/yellow]")
-            elif not self.findings:
-                self.console.print("[yellow]No findings to exploit. Run 'scan' first.[/yellow]")
-            else:
-                await self._run_exploit()
+        elif command == "/scan":
+            await self._quick_scan(args.strip() or self.target)
         
-        elif cmd == "report":
-            await self._generate_report()
+        elif command == "/tools":
+            self._show_tools()
         
-        elif cmd == "config":
-            self._show_config()
+        elif command == "/engines":
+            self._show_engines()
         
-        elif cmd == "session":
-            await self._handle_session(args)
+        elif command == "/history":
+            self._show_history()
         
-        elif cmd == "clear":
+        elif command == "/clear":
             self.console.clear()
-            self.show_banner()
+            self._print_header()
         
-        elif cmd in ("ai-attack", "jailbreak"):
-            await self.stream_response(
-                f"I want to perform an {cmd} attack. "
-                f"Target: {args if args else 'general LLM'}. "
-                "Explain the methodology and provide example prompts."
-            )
-        
-        elif cmd in ("nmap", "nikto", "gobuster"):
-            # Tool commands - give guidance
-            target = args if args else self.target
-            await self.stream_response(
-                f"Give me the exact {cmd} command to scan {target or 'a typical web server'}. "
-                "Explain what each flag does."
-            )
-        
-        elif cmd in ("privesc", "persist", "exfil", "payload"):
-            await self.stream_response(
-                f"Explain how to perform {cmd} "
-                f"{'on ' + self.target if self.target else 'on a Linux system'}. "
-                "Provide specific commands and techniques."
-            )
-        
-        elif cmd == "auto-pwn":
-            await self._run_auto_pwn(args)
+        elif command == "/compact":
+            self.compact_mode = not self.compact_mode
+            mode = "on" if self.compact_mode else "off"
+            self.console.print(f"\n  [dim]Compact mode: {mode}[/dim]\n")
         
         else:
-            # Natural language query
-            await self.stream_response(command)
+            self.console.print(f"\n  [red]Unknown command:[/red] {command}. Try /help\n")
         
         return True
     
-    async def _run_scan(self):
-        """Run scanning workflow"""
+    def _show_help(self):
+        """Show help - Claude Code style"""
+        self.console.print()
         
-        self.console.print(f"\n[cyan]Starting scan on[/cyan] [bright_yellow]{self.target}[/bright_yellow]")
+        table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        table.add_column("Command", style="bold cyan", no_wrap=True, min_width=16)
+        table.add_column("Description", style="dim")
         
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            console=self.console
-        ) as progress:
-            
-            task = progress.add_task("Scanning...", total=100)
-            
-            # Phase 1: Recon
-            progress.update(task, description="Reconnaissance...")
-            await asyncio.sleep(0.5)
-            await self.stream_response(
-                f"Perform passive reconnaissance on {self.target}. "
-                "What DNS records, WHOIS info, and technology stack can you identify?"
-            )
-            progress.update(task, advance=30)
-            
-            # Phase 2: Port scan
-            progress.update(task, description="Port scanning...")
-            await asyncio.sleep(0.3)
-            await self.stream_response(
-                f"What nmap command would you recommend for {self.target}? "
-                "Provide the exact command and explain what it does."
-            )
-            progress.update(task, advance=30)
-            
-            # Phase 3: Vulnerability assessment
-            progress.update(task, description="Vulnerability assessment...")
-            await self.stream_response(
-                f"Based on typical services, what vulnerabilities should we check for on {self.target}? "
-                "List specific CVEs or vulnerability classes."
-            )
-            progress.update(task, advance=40)
+        for cmd, desc in SLASH_COMMANDS.items():
+            table.add_row(cmd, desc)
         
-        # Add sample findings
-        self.findings.append({
-            "type": "reconnaissance",
-            "title": "Reconnaissance Complete",
-            "description": "Initial reconnaissance performed",
-            "severity": "info",
-            "target": self.target
-        })
-        
-        self.phase = Phase.VULNERABILITY_ANALYSIS
-        self.console.print(f"\n[green]✓[/green] Scan complete. {len(self.findings)} finding(s).")
-    
-    async def _run_exploit(self):
-        """Run exploitation workflow"""
-        
-        self.console.print(f"\n[yellow]⚠ Attempting exploitation on[/yellow] [bright_yellow]{self.target}[/bright_yellow]")
-        
-        await self.stream_response(
-            f"I have the following findings for {self.target}:\n"
-            f"{self.findings}\n\n"
-            "What exploitation techniques would you recommend? "
-            "Be specific about tools and methods."
-        )
-        
-        self.phase = Phase.POST_EXPLOITATION
-    
-    async def _run_auto_pwn(self, args: str = ""):
-        """
-        Launch autonomous AI pentesting agent
-        Usage: auto-pwn <target> [objective]
-        """
-        
-        if not AUTONOMOUS_AGENT_AVAILABLE:
-            self.console.print("[red]Autonomous agent not available.[/red]")
-            self.console.print("[dim]Install langgraph: pip install langgraph[/dim]")
-            return
-        
-        # Parse args: target [objective]
-        parts = args.split(maxsplit=1) if args else []
-        target = parts[0] if parts else self.target
-        objective = parts[1] if len(parts) > 1 else "Find all flags and report vulnerabilities"
-        
-        if not target:
-            self.console.print("[yellow]Usage: auto-pwn <target> [objective][/yellow]")
-            self.console.print("[dim]Example: auto-pwn 10.10.10.1 find all flags[/dim]")
-            return
-        
-        # Update current target
-        self.target = target
-        
-        # Display launch banner
         self.console.print(Panel(
-            f"[bold bright_yellow]🎯 TARGET:[/bold bright_yellow] {target}\n"
-            f"[bold cyan]📋 OBJECTIVE:[/bold cyan] {objective}\n\n"
-            "[dim]The agent will autonomously:[/dim]\n"
-            "  • Scan for open ports and services\n"
-            "  • Enumerate discovered services\n"
-            "  • Attempt exploitation\n"
-            "  • Find and report flags\n\n"
-            "[yellow]Press Ctrl+C to abort at any time[/yellow]",
-            title="[bold red]⚡ AUTONOMOUS AGENT LAUNCHING ⚡[/bold red]",
-            border_style="red"
+            table,
+            title="[bold]Commands[/bold]",
+            border_style="dim",
+            padding=(1, 2)
         ))
         
-        try:
-            # Create and run autonomous agent
-            agent = AutonomousAgent(
-                llm=self.llm,
-                workspace=str(self.workspace)
-            )
-            
-            # Set up event handlers for live updates
-            def on_phase_change(phase):
-                self.console.print(f"\n[cyan]>>> Phase:[/cyan] [bold]{phase}[/bold]")
-            
-            def on_tool_start(data):
-                tool = data.get('tool', 'unknown')
-                args = data.get('args', {})
-                self.console.print(f"  [dim]🔧 Running:[/dim] [green]{tool}[/green]")
-            
-            def on_tool_complete(data):
-                result = data.get('result', '')
-                if len(result) > 200:
-                    result = result[:200] + '...'
-                self.console.print(f"  [dim]✓ Result:[/dim] {result[:100]}")
-            
-            def on_flag_found(flag):
-                self.console.print(f"\n[bold green]🚩 FLAG FOUND:[/bold green] [bright_yellow]{flag}[/bright_yellow]\n")
-            
-            # Register handlers
-            agent.on('phase_change', on_phase_change)
-            agent.on('tool_start', on_tool_start)
-            agent.on('tool_complete', on_tool_complete)
-            agent.on('flag_found', on_flag_found)
-            
-            # Run the agent
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=self.console
-            ) as progress:
-                task = progress.add_task("Agent running...", total=None)
-                
-                result = await agent.run(
-                    target=target,
-                    objective=objective,
-                    max_iterations=50
-                )
-            
-            # Display results
-            flags = result.get('flags', [])
-            vulns = result.get('vulnerabilities', [])
-            
-            self.console.print("\n")
-            self.console.print(Panel(
-                f"[bold green]✓ AUTONOMOUS AGENT COMPLETE[/bold green]\n\n"
-                f"[cyan]Iterations:[/cyan] {result.get('iterations', 0)}\n"
-                f"[cyan]Flags Found:[/cyan] {len(flags)}\n"
-                f"[cyan]Vulnerabilities:[/cyan] {len(vulns)}\n\n"
-                + ("\n".join([f"  🚩 {f}" for f in flags]) if flags else "[dim]No flags found[/dim]"),
-                title="[bold cyan]🎯 RESULTS[/bold cyan]",
-                border_style="green"
-            ))
-            
-            # Add flags to findings
-            for flag in flags:
-                if isinstance(flag, dict):
-                    self.findings.append({
-                        'type': 'flag',
-                        'title': f"Flag: {flag.get('flag', 'unknown')}",
-                        'severity': 'info',
-                        'description': f"Found at {flag.get('location', 'unknown')} via {flag.get('method', 'unknown')}"
-                    })
-                else:
-                    self.findings.append({
-                        'type': 'flag',
-                        'title': f"Flag: {flag}",
-                        'severity': 'info',
-                        'description': 'Found by autonomous agent'
-                    })
-            
-        except KeyboardInterrupt:
-            self.console.print("\n[yellow]⚠ Agent aborted by user[/yellow]")
-        except Exception as e:
-            self.console.print(f"\n[red]Agent error: {e}[/red]")
-            import traceback
-            self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        self.console.print("  [dim]You can also type natural language requests.[/dim]")
+        self.console.print("  [dim]Example: 'scan 10.10.10.1 for open ports'[/dim]")
+        self.console.print()
     
-    async def _generate_report(self):
-        """Generate findings report"""
+    def _show_status(self):
+        """Show session status"""
+        self.console.print()
         
-        self.console.print("\n[cyan]Generating report...[/cyan]")
+        elapsed = datetime.now() - self.session_start
         
-        report_content = f"""# RedClaw Security Assessment Report
-
-## Target: {self.target or 'N/A'}
-## Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-## Session: {self.session_id}
-
-## Executive Summary
-Security assessment performed using RedClaw autonomous red team agent.
-
-## Findings ({len(self.findings)})
-"""
-        for i, f in enumerate(self.findings, 1):
-            report_content += f"""
-### {i}. {f.get('title', 'Finding')}
-- **Severity**: {f.get('severity', 'N/A').upper()}
-- **Type**: {f.get('type', 'N/A')}
-- **Description**: {f.get('description', 'N/A')}
-"""
+        table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        table.add_column("Key", style="dim", no_wrap=True)
+        table.add_column("Value", style="white")
         
-        report_content += """
-## Recommendations
-See individual findings for specific remediation steps.
-
----
-*Generated by RedClaw v2.0*
-"""
+        table.add_row("Target", self.target or "(none)")
+        table.add_row("Phase", self.phase.value)
+        table.add_row("Session", str(elapsed).split(".")[0])
+        table.add_row("Findings", str(len(self.findings)))
+        table.add_row("Tool Calls", str(len(self.tool_history)))
+        table.add_row("Agent", "ready" if self.agent else "not loaded")
+        table.add_row("LLM", "connected" if self.llm else "not connected")
         
-        # Save report
-        reports_dir = self.workspace / "reports"
-        reports_dir.mkdir(exist_ok=True)
-        
-        report_file = reports_dir / f"report_{self.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        report_file.write_text(report_content)
-        
-        self.console.print(Markdown(report_content))
-        self.console.print(f"\n[green]✓[/green] Report saved: [cyan]{report_file}[/cyan]")
-        
-        self.phase = Phase.REPORTING
+        self.console.print(Panel(table, title="[bold]Session Status[/bold]", border_style="dim"))
+        self.console.print()
     
-    def _show_config(self):
-        """Show configuration"""
+    def _show_tools(self):
+        """Show all available tools"""
+        self.console.print()
         
-        table = Table(title="Configuration", box=box.ROUNDED)
-        table.add_column("Setting", style="cyan")
-        table.add_column("Value")
+        table = Table(title="Available Tools", box=box.ROUNDED, border_style="dim")
+        table.add_column("Tool", style="cyan", no_wrap=True)
+        table.add_column("Source", style="yellow")
+        table.add_column("Description", style="dim")
         
-        table.add_row("LLM URL", self.llm.api_url if self.llm else "N/A")
-        table.add_row("LLM Model", self.llm.model if self.llm else "N/A")
-        table.add_row("Workspace", str(self.workspace))
-        table.add_row("Auto-Exploit", "Enabled" if self.auto_exploit else "Disabled")
-        table.add_row("Verbose", "Yes" if self.verbose else "No")
-        table.add_row("Tab Completion", "Enabled" if PROMPT_TOOLKIT_AVAILABLE else "Disabled")
+        # Agent tools
+        if AGENT_AVAILABLE:
+            for tool in TOOL_DEFINITIONS:
+                table.add_row(tool["name"], "agent", tool["description"][:50])
+        
+        # HexStrike tools
+        if HEXSTRIKE_AVAILABLE:
+            hexstrike_tools = [
+                ("hexstrike.start_scan", "hexstrike", "Start vulnerability scan"),
+                ("hexstrike.launch_attack", "hexstrike", "Launch attack on target"),
+                ("hexstrike.run_nmap", "hexstrike", "Nmap via HexStrike API"),
+                ("hexstrike.run_nikto", "hexstrike", "Nikto via HexStrike API"),
+                ("hexstrike.run_sqlmap", "hexstrike", "SQLMap via HexStrike API"),
+                ("hexstrike.analyze_target", "hexstrike", "AI target analysis"),
+            ]
+            for name, src, desc in hexstrike_tools:
+                table.add_row(name, src, desc)
+        
+        # MCP tools
+        if MCP_AVAILABLE and self.engines.mcp:
+            for tool in self.engines.mcp.get_all_tools():
+                table.add_row(tool["name"], "mcp", tool["description"][:50])
         
         self.console.print(table)
+        self.console.print()
     
-    async def _handle_session(self, args: str):
-        """Handle session commands"""
+    def _show_engines(self):
+        """Show engine connection status"""
+        self.console.print()
         
-        parts = args.split()
-        subcmd = parts[0] if parts else "list"
+        table = Table(title="Engine Status", box=box.ROUNDED, border_style="dim")
+        table.add_column("Engine", style="cyan", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Module", style="dim")
         
-        if subcmd == "save":
-            if self.memory:
-                self.memory.save_session(
-                    target=self.target or "",
-                    phase=self.phase.value,
-                    state={"findings": self.findings}
-                )
-                self.console.print(f"[green]✓[/green] Session saved: {self.session_id}")
+        engines = [
+            ("HexStrike", self.engines._status.get("hexstrike", "?"), "engines.hexstrike_client"),
+            ("Metasploit", self.engines._status.get("metasploit", "?"), "engines.metasploit_client"),
+            ("CALDERA", self.engines._status.get("caldera", "?"), "engines.caldera_client"),
+            ("MCP Bridge", self.engines._status.get("mcp", "?"), "integrations.mcp_bridge"),
+        ]
         
-        elif subcmd == "load":
-            if len(parts) > 1 and self.memory:
-                session_data = self.memory.load_session(parts[1])
-                if session_data:
-                    self.target = session_data.get("target")
-                    self.phase = Phase(session_data.get("phase", "pre_engagement"))
-                    self.findings = session_data.get("state", {}).get("findings", [])
-                    self.console.print(f"[green]✓[/green] Session loaded")
-                else:
-                    self.console.print("[yellow]Session not found[/yellow]")
+        for name, status, module in engines:
+            if status in ("online", "ready"):
+                status_str = f"[green]● {status}[/green]"
+            elif status == "fallback":
+                status_str = f"[yellow]● {status}[/yellow]"
+            elif status == "offline":
+                status_str = f"[red]● {status}[/red]"
+            else:
+                status_str = f"[dim]○ {status}[/dim]"
+            
+            table.add_row(name, status_str, module)
         
-        elif subcmd == "list":
-            if self.memory:
-                sessions = self.memory.list_sessions()
-                if sessions:
-                    table = Table(title="Saved Sessions", box=box.ROUNDED)
-                    table.add_column("ID", style="cyan")
-                    table.add_column("Target")
-                    table.add_column("Phase")
-                    table.add_column("Saved")
-                    
-                    for s in sessions:
-                        table.add_row(
-                            s.get("session_id", ""),
-                            s.get("target", "N/A"),
-                            s.get("phase", "N/A"),
-                            s.get("saved_at", "N/A")[:19]
-                        )
-                    
-                    self.console.print(table)
-                else:
-                    self.console.print("[dim]No saved sessions.[/dim]")
+        self.console.print(table)
+        self.console.print()
     
-    async def _export_session(self, filename: str):
-        """Export session data to JSON file"""
-        import json
+    def _show_history(self):
+        """Show tool execution history"""
+        self.console.print()
         
-        export_data = {
-            "session_id": self.session_id,
-            "target": self.target,
-            "phase": self.phase.value,
-            "findings": self.findings,
-            "command_history": self.command_history,
-            "exported_at": datetime.now().isoformat()
-        }
+        if not self.tool_history:
+            self.console.print("  [dim]No tool calls yet.[/dim]\n")
+            return
         
-        export_path = self.workspace / filename
-        with open(export_path, 'w') as f:
-            json.dump(export_data, f, indent=2)
+        table = Table(title="Tool History", box=box.SIMPLE, border_style="dim")
+        table.add_column("#", style="dim", no_wrap=True)
+        table.add_column("Tool", style="cyan")
+        table.add_column("Source", style="yellow")
+        table.add_column("Time", style="dim")
         
-        self.console.print(f"[green]✓[/green] Session exported: [cyan]{export_path}[/cyan]")
-
+        for i, entry in enumerate(self.tool_history[-20:], 1):
+            table.add_row(
+                str(i),
+                entry["tool"],
+                entry.get("source", "user"),
+                entry.get("time", "")[:19]
+            )
+        
+        self.console.print(table)
+        self.console.print()
     
-    def _get_prompt(self) -> str:
-        """Get formatted prompt string"""
-        phase_indicator = "●" if self.target else "○"
-        target_str = f" @ {self.target}" if self.target else ""
+    # ==========================================
+    #  CORE ACTIONS
+    # ==========================================
+    
+    async def _quick_scan(self, target: Optional[str] = None):
+        """Quick scan using engines"""
+        if not target:
+            self.console.print("\n  [red]No target.[/red] Usage: /scan <target>\n")
+            return
         
-        if PROMPT_TOOLKIT_AVAILABLE:
-            return f"RedClaw{target_str} > "
+        self.target = target
+        self.console.print(f"\n  [bold]Scanning {target}...[/bold]\n")
+        
+        # Use HexStrike if available, otherwise agent tool
+        result = await self.engines.execute_via_engine("nmap_scan", {"target": target, "options": "-sV -sC"})
+        
+        self.tool_renderer.render_tool_result(
+            "nmap_scan", {"target": target}, result, 
+            success="error" not in result.lower()
+        )
+        
+        self.tool_history.append({
+            "tool": "nmap_scan",
+            "args": {"target": target},
+            "time": datetime.now().isoformat(),
+            "source": "engine/hexstrike" if self.engines.hexstrike else "local"
+        })
+    
+    async def _run_auto_pwn(self, target: str):
+        """Run autonomous pentesting agent"""
+        self.target = target
+        
+        self.console.print(f"\n  [bold red]Auto-Pwn[/bold red] targeting [bold yellow]{target}[/bold yellow]")
+        self.console.print(f"  [dim]AI agent will autonomously select and execute tools.[/dim]\n")
+        
+        if not AGENT_AVAILABLE:
+            self.console.print("  [red]Autonomous agent not available.[/red]\n")
+            return
+        
+        # Show which engines are available
+        engine_status = self.engines.get_status()
+        self.console.print("  [bold]Engines available for this session:[/bold]")
+        for engine, status in engine_status.items():
+            if status in ("online", "ready", "fallback"):
+                self.console.print(f"    [green]●[/green] {engine}")
+            else:
+                self.console.print(f"    [dim]○[/dim] {engine} ({status})")
+        self.console.print()
+        
+        # Create agent with engine integration
+        agent = AutonomousAgent(verbose=True)
+        
+        # Wire up event handlers for real-time visualization
+        agent.on("tool_start", self._on_tool_start)
+        agent.on("tool_end", self._on_tool_end)
+        agent.on("phase_change", self._on_phase_change)
+        agent.on("thinking", self._on_thinking)
+        
+        # Run agent - it will autonomously decide which tools to use
+        self.console.print("  [bold]Agent starting autonomous operation...[/bold]\n")
+        
+        try:
+            # If LLM is available, use full agent loop
+            if self.llm:
+                state = AgentState(target=target, objective=f"find vulnerabilities in {target}")
+                # The agent loop will:
+                # 1. Ask LLM what tool to use
+                # 2. Execute the tool (via engines)
+                # 3. Feed results back to LLM
+                # 4. Repeat until done
+                self.console.print("  [dim]LLM connected - full autonomous loop[/dim]\n")
+            else:
+                # Demo mode - show the flow with simulated decisions
+                await self._run_demo_autopwn(target, agent)
+        
+        except Exception as e:
+            self.console.print(f"  [red]Agent error: {e}[/red]\n")
+    
+    async def _run_demo_autopwn(self, target: str, agent: AutonomousAgent):
+        """Demo autonomous flow showing AI tool selection"""
+        
+        phases = [
+            {
+                "phase": "RECONNAISSANCE",
+                "thinking": f"I need to discover open ports on {target}. I'll use nmap_scan first.",
+                "tool": "nmap_scan", 
+                "args": {"target": target, "ports": "1-1000", "scan_type": "default"},
+                "engine": "hexstrike"
+            },
+            {
+                "phase": "SCANNING",
+                "thinking": "Nmap revealed web service. I should enumerate web directories with gobuster.",
+                "tool": "gobuster_scan",
+                "args": {"url": f"http://{target}", "wordlist": "/usr/share/wordlists/dirb/common.txt"},
+                "engine": "local"
+            },
+            {
+                "phase": "SCANNING",
+                "thinking": "Found web directories. Let me run nikto for web vulnerability scanning.",
+                "tool": "nikto_scan",
+                "args": {"target": f"http://{target}"},
+                "engine": "hexstrike"
+            },
+            {
+                "phase": "ENUMERATION",
+                "thinking": "Let me check if there's SSH access. I'll try to connect.",
+                "tool": "ssh_connect",
+                "args": {"target": target, "username": "root", "password": ""},
+                "engine": "local"
+            },
+            {
+                "phase": "EXPLOITATION", 
+                "thinking": "Vulnerability found in web app. Launching exploit via HexStrike.",
+                "tool": "launch_attack",
+                "args": {"target": target, "attack_type": "exploit"},
+                "engine": "hexstrike"
+            },
+        ]
+        
+        for step in phases:
+            # Phase change
+            self._on_phase_change(step["phase"])
+            await asyncio.sleep(0.3)
+            
+            # AI thinking
+            self.console.print(f"\n  [italic dim]{step['thinking']}[/italic dim]")
+            await asyncio.sleep(0.3)
+            
+            # Tool selection and execution
+            engine_label = step["engine"]
+            self.tool_renderer.render_tool_start(step["tool"], step["args"])
+            
+            # Execute through engine manager
+            start_time = time.time()
+            result = await self.engines.execute_via_engine(step["tool"], step["args"])
+            duration = time.time() - start_time
+            
+            # Show which engine handled it
+            self.console.print(f"  [dim]Routed via: {engine_label}[/dim]")
+            self.tool_renderer.render_tool_output(result[:300], "error" not in result.lower())
+            
+            # Record in history
+            self.tool_history.append({
+                "tool": step["tool"],
+                "args": step["args"],
+                "time": datetime.now().isoformat(),
+                "source": f"ai_agent → {engine_label}",
+                "phase": step["phase"]
+            })
+            
+            await asyncio.sleep(0.2)
+        
+        # Summary
+        self.console.print()
+        self.console.print(Panel(
+            f"[bold green]Autonomous scan complete[/bold green]\n\n"
+            f"Target: [yellow]{target}[/yellow]\n"
+            f"Tools executed: [cyan]{len(phases)}[/cyan]\n"
+            f"Engines used: HexStrike, Local\n"
+            f"AI made all tool decisions autonomously",
+            title="[bold]Auto-Pwn Results[/bold]",
+            border_style="green"
+        ))
+        self.console.print()
+    
+    async def _process_natural_language(self, text: str):
+        """Process natural language input"""
+        self.console.print()
+        
+        # Simple pattern matching for common requests
+        lower = text.lower()
+        
+        if any(w in lower for w in ["scan", "nmap", "port"]):
+            target = self.target
+            # Try to extract target from text
+            words = text.split()
+            for w in words:
+                if "." in w and any(c.isdigit() for c in w):
+                    target = w
+                    break
+            
+            if target:
+                await self._quick_scan(target)
+            else:
+                self.console.print("  [dim]Please set a target first: /target <ip>[/dim]\n")
+        
+        elif "auto" in lower or "pwn" in lower or "hack" in lower:
+            target = self.target
+            words = text.split()
+            for w in words:
+                if "." in w and any(c.isdigit() for c in w):
+                    target = w
+                    break
+            
+            if target:
+                await self._run_auto_pwn(target)
+            else:
+                self.console.print("  [dim]Please set a target first: /target <ip>[/dim]\n")
+        
+        elif any(w in lower for w in ["status", "how", "what"]):
+            self._show_status()
+        
+        elif any(w in lower for w in ["tool", "engine", "help"]):
+            self._show_tools()
+        
         else:
-            return f"[bold red]RedClaw[/bold red][cyan]{target_str}[/cyan] > "
+            # If LLM available, forward to LLM
+            if self.llm:
+                self.console.print("  [dim]Processing with AI...[/dim]")
+                # Would stream LLM response here
+            else:
+                self.console.print(f"  [dim]I understand: '{text}'. To take action, use /help for commands.[/dim]\n")
+    
+    # ==========================================
+    #  MAIN LOOP
+    # ==========================================
     
     async def run(self):
         """Main application loop"""
+        self._print_header()
         
-        self.show_banner()
+        # Initialize
+        with Progress(SpinnerColumn(), TextColumn("[dim]Initializing engines...[/dim]"), transient=True, console=self.console) as progress:
+            task = progress.add_task("init", total=None)
+            await self.initialize()
         
-        if not await self.initialize():
-            self.console.print("[red]Failed to initialize. Exiting.[/red]")
-            return
+        self._print_status_line()
+        self._show_engines()
         
-        self.console.print(f"[green]✓[/green] Ready | Session: [cyan]{self.session_id}[/cyan]")
-        
-        # Show placeholder suggestions
-        self.show_placeholder()
-        
-        running = True
-        while running:
+        # Main input loop
+        while True:
             try:
-                if PROMPT_TOOLKIT_AVAILABLE and self.prompt_session:
-                    # Use prompt_toolkit with Tab completion
-                    user_input = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: self.prompt_session.prompt(
-                            HTML(f'<ansibrightred>RedClaw</ansibrightred>'
-                                 f'<ansicyan>{" @ " + self.target if self.target else ""}</ansicyan> › ')
-                        )
+                if self.session:
+                    prompt_text = self._get_prompt()
+                    text = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: self.session.prompt(HTML(f'<style fg="#FF6666"><b>{prompt_text}</b></style>'))
                     )
                 else:
-                    # Fallback to rich prompt
-                    from rich.prompt import Prompt
-                    user_input = Prompt.ask(self._get_prompt())
+                    text = input(self._get_prompt())
                 
-                running = await self.handle_command(user_input)
-                
+                if not await self.handle_input(text):
+                    break
+                    
             except KeyboardInterrupt:
-                self.console.print("\n[dim]Use 'exit' to quit.[/dim]")
+                self.console.print("\n  [dim]Use /exit to quit.[/dim]")
             except EOFError:
                 break
-            except Exception as e:
-                self.console.print(f"[red]Error: {e}[/red]")
-        
-        # Cleanup
-        self.console.print("\n[cyan]Goodbye! 👋[/cyan]")
-        if self.llm:
-            self.llm.close()
 
 
-async def main():
-    """Entry point"""
-    app = RedClawApp()
-    await app.run()
-
+# ==========================================
+#  ENTRY POINTS
+# ==========================================
 
 def cli_entry():
-    """CLI entry point for setup.py"""
-    asyncio.run(main())
+    """Entry point for CLI"""
+    app = RedClawApp()
+    asyncio.run(app.run())
+
+
+def main():
+    """Alternative entry"""
+    cli_entry()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

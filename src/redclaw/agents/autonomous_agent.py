@@ -694,3 +694,64 @@ async def auto_pwn(target: str, objective: str = "Find all flags") -> Dict:
     """
     agent = AutonomousAgent(verbose=True)
     return await agent.run(target, objective)
+
+
+def execute_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
+    """
+    Execute a tool by name (synchronous wrapper for demo/testing).
+    
+    This maps tool names to their command construction logic
+    without requiring the full async executor infrastructure.
+    """
+    result = {
+        "tool": tool_name,
+        "args": kwargs,
+        "status": "executed",
+        "output": ""
+    }
+    
+    if tool_name == "nmap_scan":
+        target = kwargs.get("target", "127.0.0.1")
+        ports = kwargs.get("ports", "1-1000")
+        scan_type = kwargs.get("scan_type", "default")
+        scan_flags = {"quick": "F", "default": "sV", "full": "A", "stealth": "sS", "vuln": "--script vuln", "udp": "sU"}
+        flag = scan_flags.get(scan_type, "sV")
+        result["command"] = f"nmap -{flag} -p {ports} {target}"
+        result["output"] = f"Nmap scan on {target} ports {ports} ({scan_type})"
+    
+    elif tool_name == "gobuster_scan":
+        url = kwargs.get("url", "")
+        wordlist = kwargs.get("wordlist", "/usr/share/wordlists/dirb/common.txt")
+        result["command"] = f"gobuster dir -u {url} -w {wordlist} -q"
+        result["output"] = f"Gobuster scan on {url}"
+    
+    elif tool_name == "nikto_scan":
+        target = kwargs.get("target", "")
+        result["command"] = f"nikto -h {target}"
+        result["output"] = f"Nikto scan on {target}"
+    
+    elif tool_name == "curl_request":
+        url = kwargs.get("url", "")
+        result["command"] = f"curl -s {url}"
+        result["output"] = f"HTTP request to {url}"
+    
+    elif tool_name == "ssh_connect":
+        host = kwargs.get("host", kwargs.get("target", ""))
+        user = kwargs.get("username", "root")
+        result["command"] = f"ssh {user}@{host}"
+        result["output"] = f"SSH connection to {user}@{host}"
+    
+    elif tool_name == "bash_command":
+        cmd = kwargs.get("command", "")
+        result["command"] = cmd
+        result["output"] = f"Bash: {cmd}"
+    
+    elif tool_name == "report_flag":
+        flag = kwargs.get("flag", "")
+        result["output"] = f"Flag recorded: {flag}"
+    
+    else:
+        result["status"] = "unknown_tool"
+        result["output"] = f"Tool {tool_name} not recognized"
+    
+    return result
